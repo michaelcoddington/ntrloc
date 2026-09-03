@@ -888,7 +888,7 @@ class RegisterPartitionManagerProjectionIntegrationTest extends AbstractIntegrat
         UUID bookId = createBook("Dune", 400, true, "Fiction");
         var noGrants = new RequestPermissionContext(false, java.util.Set.of(), java.util.Set.of(), java.util.Set.of(),
                 java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of(),
-                java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
 
         var book = registerPartitionManager.projectOne(fixture.bookTypeId(), bookId, "http://binary", null, noGrants).orElseThrow();
 

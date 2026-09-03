@@ -203,6 +203,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         assertThat(result.get().permissions().edit()).isEqualTo(
                 Map.of("scalars", List.of("*"), "objects", Map.of("dimensions", Map.of("scalars", List.of("*")))));
         assertThat(result.get().permissions().delete()).isTrue();
+        assertThat(result.get().permissions().createLinks()).containsExactly("products");
     }
 
     // A write grant on every scalar under a nested OBJECT property must surface as that node
@@ -241,6 +242,35 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
     }
 
     // --- Link property filtering and link capability, distinguished from item-level grants ---
+
+    // link:create is a source-item permission, not something attached to any particular existing
+    // link -- so unlike the link:read/delete tests below, this doesn't need an actual link to exist
+    // at all, just the source item and a can_create grant on its own marker for the perspective.
+    @Test
+    void createLinksCapability_governedByLinkPerspectiveCreateGrant() {
+        UUID productId = createProduct("Widget", "red");
+        var principal = newUserInEveryoneGroup();
+        UUID sourceGrantId = grantId(markerOnItem(productId).id(), principal);
+        authRepo.setItemPermissions(sourceGrantId, true, false);
+        authRepo.grantLinkPerspectiveAccess(sourceGrantId, fixture.productPerspectiveId(), true, false, false); // link:create only
+
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
+
+        assertThat(result.get().permissions().createLinks()).containsExactly("products");
+    }
+
+    @Test
+    void createLinksCapability_absentWithoutCreateGrant() {
+        UUID productId = createProduct("Widget", "red");
+        var principal = newUserInEveryoneGroup();
+        UUID sourceGrantId = grantId(markerOnItem(productId).id(), principal);
+        authRepo.setItemPermissions(sourceGrantId, true, false);
+        authRepo.grantLinkPerspectiveAccess(sourceGrantId, fixture.productPerspectiveId(), false, true, false); // link:read only, no create
+
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
+
+        assertThat(result.get().permissions().createLinks()).isNull();
+    }
 
     @Test
     void linkPropertyWithNoReadGrant_isAbsentFromResponse() {
@@ -303,6 +333,9 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         // grant was given on the contributor, so it must stay false even though the link is
         // deletable and the outer product is.
         assertThat(link.item().permissions().delete()).isFalse();
+        // createLinks has no meaning on a link's own permissions (a link doesn't originate further
+        // links) -- always null there, regardless of what create grants exist elsewhere.
+        assertThat(link.permissions().createLinks()).isNull();
     }
 
     @Test

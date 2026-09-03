@@ -45,6 +45,7 @@ public class AuthorizationCacheManager {
             Map<PrincipalKey, Map<UUID, Set<UUID>>> propertyWriteGrants,
             Map<PrincipalKey, Map<UUID, Set<UUID>>> linkPropertyReadGrants,
             Map<PrincipalKey, Map<UUID, Set<UUID>>> linkPropertyWriteGrants,
+            Map<PrincipalKey, Map<UUID, Set<UUID>>> linkPerspectiveCreateGrants,
             Map<PrincipalKey, Map<UUID, Set<UUID>>> linkPerspectiveReadGrants,
             Map<PrincipalKey, Map<UUID, Set<UUID>>> linkPerspectiveDeleteGrants,
             Map<PrincipalKey, Map<UUID, Set<UUID>>> transitionExecuteGrants,
@@ -77,19 +78,23 @@ public class AuthorizationCacheManager {
 
     private record NestedGrantMaps(Map<PrincipalKey, Map<UUID, Set<UUID>>> first, Map<PrincipalKey, Map<UUID, Set<UUID>>> second) {}
 
+    private record LinkPerspectiveGrantMaps(Map<PrincipalKey, Map<UUID, Set<UUID>>> createGrants,
+                                             Map<PrincipalKey, Map<UUID, Set<UUID>>> readGrants,
+                                             Map<PrincipalKey, Map<UUID, Set<UUID>>> deleteGrants) {}
+
     private void rebuildCache() {
         Map<PrincipalOpKey, Set<UUID>> itemTypeGrants = buildItemTypeGrants();
         MarkerGrantMaps markerGrants = buildMarkerGrants();
         NestedGrantMaps propertyGrants = buildPropertyGrants(authRepo.getAllPropertyGrants());
         NestedGrantMaps linkPropertyGrants = buildPropertyGrants(authRepo.getAllLinkPropertyGrants());
-        NestedGrantMaps linkPerspectiveGrants = buildLinkPerspectiveGrants();
+        LinkPerspectiveGrantMaps linkPerspectiveGrants = buildLinkPerspectiveGrants();
         // Existence-only grants (transition:execute, state-machine:start): a row present == granted.
         Map<PrincipalKey, Map<UUID, Set<UUID>>> transitionExecuteGrants = buildExistenceGrants(authRepo.getAllTransitionGrants());
         Map<PrincipalKey, Map<UUID, Set<UUID>>> stateMachineStartGrants = buildExistenceGrants(authRepo.getAllStateMachineStartGrants());
 
         cache.set(new Snapshot(itemTypeGrants, markerGrants.readMarkers(), markerGrants.deleteMarkers(),
                 propertyGrants.first(), propertyGrants.second(), linkPropertyGrants.first(), linkPropertyGrants.second(),
-                linkPerspectiveGrants.first(), linkPerspectiveGrants.second(),
+                linkPerspectiveGrants.createGrants(), linkPerspectiveGrants.readGrants(), linkPerspectiveGrants.deleteGrants(),
                 transitionExecuteGrants, stateMachineStartGrants));
     }
 
@@ -124,15 +129,17 @@ public class AuthorizationCacheManager {
         return new NestedGrantMaps(readGrants, writeGrants);
     }
 
-    private NestedGrantMaps buildLinkPerspectiveGrants() {
+    private LinkPerspectiveGrantMaps buildLinkPerspectiveGrants() {
+        Map<PrincipalKey, Map<UUID, Set<UUID>>> createGrants = new HashMap<>();
         Map<PrincipalKey, Map<UUID, Set<UUID>>> readGrants = new HashMap<>();
         Map<PrincipalKey, Map<UUID, Set<UUID>>> deleteGrants = new HashMap<>();
         for (var row : authRepo.getAllLinkPerspectiveGrants()) {
             var key = new PrincipalKey(row.principalType(), row.principalId());
+            if (row.canCreate()) addToNestedSet(createGrants, key, row.markerId(), row.perspectiveId());
             if (row.canRead()) addToNestedSet(readGrants, key, row.markerId(), row.perspectiveId());
             if (row.canDelete()) addToNestedSet(deleteGrants, key, row.markerId(), row.perspectiveId());
         }
-        return new NestedGrantMaps(readGrants, deleteGrants);
+        return new LinkPerspectiveGrantMaps(createGrants, readGrants, deleteGrants);
     }
 
     private Map<PrincipalKey, Map<UUID, Set<UUID>>> buildExistenceGrants(List<AuthorizationRepository.MarkerScopedGrantRow> rows) {
@@ -189,6 +196,11 @@ public class AuthorizationCacheManager {
 
     public Map<UUID, Set<UUID>> getLinkPropertyWriteGrantsByMarker(UUID userId, Set<UUID> groupIds) {
         return effectiveNestedSet(cache.get().linkPropertyWriteGrants(), userId, groupIds);
+    }
+
+    /** markerId -> perspectiveIds this marker grants link:create for. */
+    public Map<UUID, Set<UUID>> getLinkPerspectiveCreateGrantsByMarker(UUID userId, Set<UUID> groupIds) {
+        return effectiveNestedSet(cache.get().linkPerspectiveCreateGrants(), userId, groupIds);
     }
 
     /** markerId -> perspectiveIds this marker grants link:read/traversal for. */

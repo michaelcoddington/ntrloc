@@ -85,6 +85,7 @@ public class PermissionService {
                 cache.getPropertyWriteGrantsByMarker(userId, groupIds),
                 cache.getLinkPropertyReadGrantsByMarker(userId, groupIds),
                 cache.getLinkPropertyWriteGrantsByMarker(userId, groupIds),
+                cache.getLinkPerspectiveCreateGrantsByMarker(userId, groupIds),
                 cache.getLinkPerspectiveReadGrantsByMarker(userId, groupIds),
                 cache.getLinkPerspectiveDeleteGrantsByMarker(userId, groupIds),
                 cache.getTransitionExecuteGrantsByMarker(userId, groupIds),

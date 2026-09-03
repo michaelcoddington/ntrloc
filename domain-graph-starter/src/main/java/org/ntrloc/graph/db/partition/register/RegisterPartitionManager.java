@@ -19,6 +19,7 @@ import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminItemDefin
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminLinkView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminPropertyDefinitionView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminSchemaView;
+import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminItemLinkPerspectiveView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminStateMachineView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminStateView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminTransitionView;
@@ -1137,14 +1138,35 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     // no shortcut, so edit's shape never depends on who's asking.
     private ProjectedItemPermissions buildPermissions(RequestPermissionContext permissions, Set<UUID> markerIds,
                                                         Map<UUID, Set<UUID>> writeGrantsByMarker, Set<UUID> deleteGrantedMarkerIds,
-                                                        List<AdminPropertyDefinitionView> rootProperties) {
+                                                        List<AdminPropertyDefinitionView> rootProperties,
+                                                        Map<String, List<AdminItemLinkPerspectiveView>> linkPerspectives) {
         if (permissions.superuser()) {
-            return new ProjectedItemPermissions(buildFullEditTree(rootProperties), true);
+            List<String> allPerspectiveNames = linkPerspectives.isEmpty() ? null : List.copyOf(linkPerspectives.keySet());
+            return new ProjectedItemPermissions(buildFullEditTree(rootProperties), true, allPerspectiveNames);
         }
         Set<UUID> grantedIds = unionGrantedIds(markerIds, writeGrantsByMarker);
         Map<String, Object> edit = grantedIds.isEmpty() ? null : buildEditTree(rootProperties, grantedIds);
         boolean canDelete = !Collections.disjoint(markerIds, deleteGrantedMarkerIds);
-        return new ProjectedItemPermissions(edit, canDelete);
+        List<String> createLinks = creatableLinkPerspectiveNames(markerIds, permissions.linkPerspectiveCreateGrantsByMarker(), linkPerspectives);
+        return new ProjectedItemPermissions(edit, canDelete, createLinks);
+    }
+
+    // Advisory only, like ProjectedItemState.startable -- names the perspectives this item's marker
+    // set grants link:create on, without regard to whether any *specific* target would actually be
+    // creatable through them (target readability can only be checked once a real target id is on the
+    // table, at actual mutation time -- see ProjectedItemPermissions' own comment). A perspective
+    // name appears once even if multiple AdminItemLinkPerspectiveView entries share it.
+    private List<String> creatableLinkPerspectiveNames(Set<UUID> markerIds, Map<UUID, Set<UUID>> createGrantsByMarker,
+                                                         Map<String, List<AdminItemLinkPerspectiveView>> linkPerspectives) {
+        Set<UUID> grantedPerspectiveIds = unionGrantedIds(markerIds, createGrantsByMarker);
+        if (grantedPerspectiveIds.isEmpty()) return null;
+        List<String> names = new ArrayList<>();
+        for (var entry : linkPerspectives.entrySet()) {
+            if (entry.getValue().stream().anyMatch(p -> grantedPerspectiveIds.contains(p.id()))) {
+                names.add(entry.getKey());
+            }
+        }
+        return names.isEmpty() ? null : names;
     }
 
     // Bottom-up: a node whose own scalar children are ALL granted collapses its "scalars" entry to
@@ -1222,6 +1244,22 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 .orElse(List.of());
     }
 
+    private Map<String, List<AdminItemLinkPerspectiveView>> linkPerspectivesForItemTypeName(String itemTypeName) {
+        return schemaManager.getAdminSchema().items().stream()
+                .filter(item -> item.name().equals(itemTypeName))
+                .findFirst()
+                .map(AdminItemDefinitionView::links)
+                .orElse(Map.of());
+    }
+
+    private Map<String, List<AdminItemLinkPerspectiveView>> linkPerspectivesForItemType(UUID itemTypeId) {
+        return schemaManager.getAdminSchema().items().stream()
+                .filter(item -> item.id().equals(itemTypeId))
+                .findFirst()
+                .map(AdminItemDefinitionView::links)
+                .orElse(Map.of());
+    }
+
     private List<AdminPropertyDefinitionView> rootPropertiesForLinkType(UUID linkTypeId) {
         return schemaManager.getAdminSchema().links().stream()
                 .filter(link -> link.id().equals(linkTypeId))
@@ -1238,12 +1276,12 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     private ProjectedItemPermissions buildLinkPermissions(RequestPermissionContext permissions, Set<UUID> sourceMarkerIds, UUID perspectiveId,
                                                             List<AdminPropertyDefinitionView> linkRootProperties) {
         if (permissions.superuser()) {
-            return new ProjectedItemPermissions(buildFullEditTree(linkRootProperties), true);
+            return new ProjectedItemPermissions(buildFullEditTree(linkRootProperties), true, null);
         }
         Set<UUID> grantedIds = unionGrantedIds(sourceMarkerIds, permissions.linkPropertyWriteGrantsByMarker());
         Map<String, Object> edit = grantedIds.isEmpty() ? null : buildEditTree(linkRootProperties, grantedIds);
         boolean canDelete = unionGrantedIds(sourceMarkerIds, permissions.linkPerspectiveDeleteGrantsByMarker()).contains(perspectiveId);
-        return new ProjectedItemPermissions(edit, canDelete);
+        return new ProjectedItemPermissions(edit, canDelete, null);
     }
 
     public record RegisterLinkedItem(UUID linkId, UUID connectedItemId) {
@@ -1684,7 +1722,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                                                 includePermissions
                                                         ? buildPermissions(permissions, linkedItemOwnMarkerIds,
                                                                 permissions.propertyWriteGrantsByMarker(), permissions.itemDeleteGrantedMarkerIds(),
-                                                                rootPropertiesForItemType(row.linkedItemTypeId()))
+                                                                rootPropertiesForItemType(row.linkedItemTypeId()),
+                                                                linkPerspectivesForItemType(row.linkedItemTypeId()))
                                                         : null,
                                                 computeDisplayLabel(row.linkedItemId(), linkedProps, displayLabelPatterns.get(row.linkedItemType())),
                                                 null), // markers: not populated for a linked item yet -- see ProjectedItem's own comment
@@ -1822,7 +1861,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
         var itemPermissions = ctx.includePermissions()
                 ? buildPermissions(ctx.permissions(), markerIds,
                         ctx.permissions().propertyWriteGrantsByMarker(), ctx.permissions().itemDeleteGrantedMarkerIds(),
-                        rootPropertiesForItemTypeName(raw.itemType()))
+                        rootPropertiesForItemTypeName(raw.itemType()),
+                        linkPerspectivesForItemTypeName(raw.itemType()))
                 : null;
         // Superuser sees every marker on the item; anyone else sees only the ones they hold an
         // item:read grant on -- never the mere existence of markers they can't read.

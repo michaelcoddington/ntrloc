@@ -32,6 +32,7 @@ public record RequestPermissionContext(
         Map<UUID, Set<UUID>> propertyWriteGrantsByMarker,
         Map<UUID, Set<UUID>> linkPropertyReadGrantsByMarker,
         Map<UUID, Set<UUID>> linkPropertyWriteGrantsByMarker,
+        Map<UUID, Set<UUID>> linkPerspectiveCreateGrantsByMarker,
         Map<UUID, Set<UUID>> linkPerspectiveReadGrantsByMarker,
         Map<UUID, Set<UUID>> linkPerspectiveDeleteGrantsByMarker,
         // Existence-only, marker-keyed: markerId -> transition ids / state-machine ids this
@@ -41,6 +42,6 @@ public record RequestPermissionContext(
 ) {
     public static RequestPermissionContext forSuperuser() {
         return new RequestPermissionContext(true, Set.of(), Set.of(), Set.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 }

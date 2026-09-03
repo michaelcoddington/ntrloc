@@ -48,7 +48,7 @@ public class AuthorizationRepository {
 
     public record PropertyGrantRow(String principalType, UUID principalId, UUID markerId, UUID propertyId, boolean canRead, boolean canWrite) {}
 
-    public record LinkPerspectiveGrantRow(String principalType, UUID principalId, UUID markerId, UUID perspectiveId, boolean canRead, boolean canDelete) {}
+    public record LinkPerspectiveGrantRow(String principalType, UUID principalId, UUID markerId, UUID perspectiveId, boolean canCreate, boolean canRead, boolean canDelete) {}
 
     // Raw row for the two existence-only grant kinds (transition:execute, state-machine:start):
     // targetId is a transition id or a state-machine id respectively.
@@ -577,12 +577,12 @@ public class AuthorizationRepository {
 
     public List<LinkPerspectiveGrantRow> getAllLinkPerspectiveGrants() {
         return jdbcClient.sql("""
-                SELECT mg.principal_type, mg.principal_id, mg.marker_id, mglp.perspective_id, mglp.can_read, mglp.can_delete
+                SELECT mg.principal_type, mg.principal_id, mg.marker_id, mglp.perspective_id, mglp.can_create, mglp.can_read, mglp.can_delete
                 FROM marker_grant_link_perspective mglp JOIN marker_grant mg ON mg.id = mglp.marker_grant_id
                 """)
                 .query((rs, n) -> new LinkPerspectiveGrantRow(
                         rs.getString(COL_PRINCIPAL_TYPE), rs.getObject(COL_PRINCIPAL_ID, UUID.class), rs.getObject(COL_MARKER_ID, UUID.class),
-                        rs.getObject(COL_PERSPECTIVE_ID, UUID.class), rs.getBoolean(COL_CAN_READ), rs.getBoolean("can_delete")))
+                        rs.getObject(COL_PERSPECTIVE_ID, UUID.class), rs.getBoolean("can_create"), rs.getBoolean(COL_CAN_READ), rs.getBoolean("can_delete")))
                 .list();
     }
 

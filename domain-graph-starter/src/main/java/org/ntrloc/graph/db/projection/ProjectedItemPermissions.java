@@ -2,6 +2,7 @@ package org.ntrloc.graph.db.projection;
 
 import org.springframework.lang.Nullable;
 
+import java.util.List;
 import java.util.Map;
 
 // edit mirrors ProjectedItem.properties' own nested shape exactly (Map<String,Object>, a leaf
@@ -24,4 +25,15 @@ import java.util.Map;
 // answer is always "everything." Chosen deliberately over a cheaper wildcard/flag shortcut,
 // consistent with the rest of this design: a value's meaning should never depend on which
 // principal is asking.
-public record ProjectedItemPermissions(@Nullable Map<String, Object> edit, boolean delete) {}
+//
+// createLinks is a third, independent capability, not part of the edit tree -- it names the link
+// perspectives (by name) this item type defines that this principal may originate a *new* link
+// through, from this item, anchored to the item's own marker via marker_grant_link_perspective.
+// can_create (see docs/ntrloc-marker-admin-ui-design-notes.md, the link:create section). Unlike
+// edit/delete, this has no meaning at all on a link's own permissions (a link doesn't originate
+// further links) -- it's always null there. Null (not empty) when nothing is creatable, same
+// omission convention as edit and ProjectedItemState. This is advisory, same as
+// ProjectedItemState.startable: it tells a client which perspectives are worth trying, not a
+// guarantee -- an actual link-create mutation still needs a valid, readable target item, which
+// can't be known generically here (see RegisterPartitionManager.creatableLinkPerspectiveNames).
+public record ProjectedItemPermissions(@Nullable Map<String, Object> edit, boolean delete, @Nullable List<String> createLinks) {}
