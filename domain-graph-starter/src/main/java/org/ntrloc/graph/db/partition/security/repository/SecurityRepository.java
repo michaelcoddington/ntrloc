@@ -60,8 +60,22 @@ public class SecurityRepository {
                 .list();
     }
 
+    // Transitive: a user's effective groups are their direct groups, plus every group any of those
+    // groups is itself (transitively) a member of via security_group_member_group. Everything
+    // downstream (AuthorizationCacheManager.effectiveSet/effectiveNestedSet, RequestPermissionContext)
+    // already unions grants over whatever this returns, so nothing above this method needs to know
+    // nesting exists at all -- the closure has to be complete by the time it leaves here.
     public Set<UUID> getGroupIdsForUser(UUID userId) {
-        return Set.copyOf(jdbcClient.sql("SELECT group_id FROM security_group_member WHERE user_id = :userId")
+        return Set.copyOf(jdbcClient.sql("""
+                WITH RECURSIVE effective_groups(group_id) AS (
+                    SELECT group_id FROM security_group_member WHERE user_id = :userId
+                    UNION
+                    SELECT smg.group_id
+                    FROM security_group_member_group smg
+                    JOIN effective_groups eg ON smg.member_group_id = eg.group_id
+                )
+                SELECT group_id FROM effective_groups
+                """)
                 .param(PARAM_USER_ID, userId)
                 .query((rs, n) -> rs.getObject("group_id", UUID.class))
                 .list());
@@ -101,6 +115,69 @@ public class SecurityRepository {
     public void addUserToGroup(UUID userId, UUID groupId) {
         jdbcClient.sql("INSERT INTO security_group_member (user_id, group_id) VALUES (:userId, :groupId) ON CONFLICT DO NOTHING")
                 .param(PARAM_USER_ID, userId).param(PARAM_GROUP_ID, groupId).update();
+    }
+
+    // memberGroupId becomes a member of groupId (same direction as addUserToGroup: member, then
+    // container). Self-membership is caught by the table's own CHECK; a deeper cycle (groupId
+    // already transitively a member of memberGroupId) has no equivalent constraint, so it's checked
+    // here before the insert.
+    public void addGroupToGroup(UUID memberGroupId, UUID groupId) {
+        if (memberGroupId.equals(groupId)) {
+            throw new IllegalArgumentException("A group cannot be a member of itself");
+        }
+        if (isTransitiveMemberOf(groupId, memberGroupId)) {
+            throw new IllegalArgumentException("Adding this membership would create a cycle");
+        }
+        jdbcClient.sql("INSERT INTO security_group_member_group (member_group_id, group_id) VALUES (:memberGroupId, :groupId) ON CONFLICT DO NOTHING")
+                .param("memberGroupId", memberGroupId).param(PARAM_GROUP_ID, groupId).update();
+    }
+
+    // True iff candidateMemberId is already (directly or transitively) a member of ofGroupId --
+    // i.e. whether groupId already appears somewhere in candidateMemberId's own membership chain.
+    // Used as the cycle guard for addGroupToGroup: adding "ofGroupId member of candidateMemberId"
+    // when this already holds true would close a loop.
+    private boolean isTransitiveMemberOf(UUID candidateMemberId, UUID ofGroupId) {
+        return Boolean.TRUE.equals(jdbcClient.sql("""
+                WITH RECURSIVE ancestors(group_id) AS (
+                    SELECT group_id FROM security_group_member_group WHERE member_group_id = :candidateMemberId
+                    UNION
+                    SELECT smg.group_id
+                    FROM security_group_member_group smg
+                    JOIN ancestors a ON smg.member_group_id = a.group_id
+                )
+                SELECT EXISTS (SELECT 1 FROM ancestors WHERE group_id = :ofGroupId)
+                """)
+                .param("candidateMemberId", candidateMemberId).param("ofGroupId", ofGroupId)
+                .query(Boolean.class).single());
+    }
+
+    public void removeGroupFromGroup(UUID memberGroupId, UUID groupId) {
+        jdbcClient.sql("DELETE FROM security_group_member_group WHERE member_group_id = :memberGroupId AND group_id = :groupId")
+                .param("memberGroupId", memberGroupId).param(PARAM_GROUP_ID, groupId).update();
+    }
+
+    // Direct (non-transitive) child groups -- groups that are themselves members of groupId.
+    public List<GroupRow> listMemberGroups(UUID groupId) {
+        return jdbcClient.sql("""
+                SELECT g.id, g.name FROM security_group g
+                JOIN security_group_member_group smg ON smg.member_group_id = g.id
+                WHERE smg.group_id = :groupId ORDER BY g.name
+                """)
+                .param(PARAM_GROUP_ID, groupId)
+                .query((rs, n) -> new GroupRow(rs.getObject("id", UUID.class), rs.getString("name")))
+                .list();
+    }
+
+    // Direct (non-transitive) parent groups -- groups that groupId is itself a member of.
+    public List<GroupRow> listContainingGroups(UUID groupId) {
+        return jdbcClient.sql("""
+                SELECT g.id, g.name FROM security_group g
+                JOIN security_group_member_group smg ON smg.group_id = g.id
+                WHERE smg.member_group_id = :groupId ORDER BY g.name
+                """)
+                .param(PARAM_GROUP_ID, groupId)
+                .query((rs, n) -> new GroupRow(rs.getObject("id", UUID.class), rs.getString("name")))
+                .list();
     }
 
     public List<GroupRow> listGroups() {

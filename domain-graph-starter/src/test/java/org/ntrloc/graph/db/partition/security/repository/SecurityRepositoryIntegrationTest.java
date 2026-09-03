@@ -8,6 +8,7 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 // Covers SecurityRepository's admin-facing listing/update/delete methods -- the ones
 // AuthorizationTestDataInitializer/AccessAdminControllerIntegrationTest's fixture setup never
@@ -90,6 +91,96 @@ class SecurityRepositoryIntegrationTest extends AbstractIntegrationTest {
         securityRepo.removeUserFromGroup(user.id(), group.id());
 
         assertThat(securityRepo.getGroupIdsForUser(user.id())).doesNotContain(group.id());
+    }
+
+    // --- Group nesting ---
+
+    @Test
+    void getGroupIdsForUser_includesGroupsTransitivelyContainingTheUsersDirectGroup() {
+        var outer = securityRepo.createGroup("outer-" + UUID.randomUUID());
+        var inner = securityRepo.createGroup("inner-" + UUID.randomUUID());
+        var user = securityRepo.createUser("user-" + UUID.randomUUID(), "Member", null, false);
+        securityRepo.addGroupToGroup(inner.id(), outer.id());
+        securityRepo.addUserToGroup(user.id(), inner.id());
+
+        assertThat(securityRepo.getGroupIdsForUser(user.id())).contains(inner.id(), outer.id());
+    }
+
+    @Test
+    void getGroupIdsForUser_resolvesMultipleLevelsOfNesting() {
+        var grandparent = securityRepo.createGroup("grandparent-" + UUID.randomUUID());
+        var parent = securityRepo.createGroup("parent-" + UUID.randomUUID());
+        var child = securityRepo.createGroup("child-" + UUID.randomUUID());
+        var user = securityRepo.createUser("user-" + UUID.randomUUID(), "Member", null, false);
+        securityRepo.addGroupToGroup(parent.id(), grandparent.id());
+        securityRepo.addGroupToGroup(child.id(), parent.id());
+        securityRepo.addUserToGroup(user.id(), child.id());
+
+        assertThat(securityRepo.getGroupIdsForUser(user.id())).contains(child.id(), parent.id(), grandparent.id());
+    }
+
+    @Test
+    void addGroupToGroup_rejectsSelfMembership() {
+        var group = securityRepo.createGroup("group-" + UUID.randomUUID());
+
+        assertThatThrownBy(() -> securityRepo.addGroupToGroup(group.id(), group.id()))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void addGroupToGroup_rejectsACycle() {
+        var a = securityRepo.createGroup("a-" + UUID.randomUUID());
+        var b = securityRepo.createGroup("b-" + UUID.randomUUID());
+        securityRepo.addGroupToGroup(a.id(), b.id()); // a is a member of b
+
+        assertThatThrownBy(() -> securityRepo.addGroupToGroup(b.id(), a.id())) // b member of a would close the loop
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void addGroupToGroup_rejectsAMultiLevelCycle() {
+        var a = securityRepo.createGroup("a-" + UUID.randomUUID());
+        var b = securityRepo.createGroup("b-" + UUID.randomUUID());
+        var c = securityRepo.createGroup("c-" + UUID.randomUUID());
+        securityRepo.addGroupToGroup(a.id(), b.id()); // a member of b
+        securityRepo.addGroupToGroup(b.id(), c.id()); // b member of c, so a is transitively a member of c
+
+        assertThatThrownBy(() -> securityRepo.addGroupToGroup(c.id(), a.id())) // c member of a would close a->b->c->a
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void listMemberGroups_returnsOnlyDirectChildren() {
+        var outer = securityRepo.createGroup("outer-" + UUID.randomUUID());
+        var inner = securityRepo.createGroup("inner-" + UUID.randomUUID());
+        var innermost = securityRepo.createGroup("innermost-" + UUID.randomUUID());
+        securityRepo.addGroupToGroup(inner.id(), outer.id());
+        securityRepo.addGroupToGroup(innermost.id(), inner.id());
+
+        // innermost is a transitive, not direct, member of outer -- must not appear here.
+        assertThat(securityRepo.listMemberGroups(outer.id())).containsExactly(inner);
+    }
+
+    @Test
+    void listContainingGroups_returnsOnlyDirectParents() {
+        var outer = securityRepo.createGroup("outer-" + UUID.randomUUID());
+        var inner = securityRepo.createGroup("inner-" + UUID.randomUUID());
+        securityRepo.addGroupToGroup(inner.id(), outer.id());
+
+        assertThat(securityRepo.listContainingGroups(inner.id())).containsExactly(outer);
+    }
+
+    @Test
+    void removeGroupFromGroup_removesTransitiveMembershipEffect() {
+        var outer = securityRepo.createGroup("outer-" + UUID.randomUUID());
+        var inner = securityRepo.createGroup("inner-" + UUID.randomUUID());
+        var user = securityRepo.createUser("user-" + UUID.randomUUID(), "Member", null, false);
+        securityRepo.addGroupToGroup(inner.id(), outer.id());
+        securityRepo.addUserToGroup(user.id(), inner.id());
+
+        securityRepo.removeGroupFromGroup(inner.id(), outer.id());
+
+        assertThat(securityRepo.getGroupIdsForUser(user.id())).contains(inner.id()).doesNotContain(outer.id());
     }
 
     // --- Local credentials ---
