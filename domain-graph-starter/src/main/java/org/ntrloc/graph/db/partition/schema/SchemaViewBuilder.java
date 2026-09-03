@@ -1,5 +1,6 @@
 package org.ntrloc.graph.db.partition.schema;
 
+import org.ntrloc.graph.db.partition.schema.definition.PropertyCardinality;
 import org.ntrloc.graph.db.partition.schema.definition.PropertyType;
 import org.ntrloc.graph.db.partition.schema.definition.view.DefinedInView;
 import org.ntrloc.graph.db.partition.schema.definition.view.SortableFieldView;
@@ -71,12 +72,27 @@ class SchemaViewBuilder {
 
     private List<SortableFieldView> sortableFieldsFor(List<AdminPropertyDefinitionView> properties) {
         var result = new ArrayList<>(SYSTEM_SORTABLE_FIELDS);
-        if (properties != null) {
-            properties.stream()
-                    .map(p -> new SortableFieldView(p.name(), false))
-                    .forEach(result::add);
-        }
+        appendSortableFields(properties, "", result);
         return List.copyOf(result);
+    }
+
+    // Recurses into OBJECT properties so a scalar leaf nested under one is sortable via its
+    // dot-separated path (e.g. "additionalDetails.priority") -- matches the dot-path resolution
+    // RegisterPartitionManager.resolveProperty already does for both ORDER BY and filter
+    // predicates, this just exposes it as a pickable option. OBJECT properties themselves, and
+    // LIST/SET-cardinality properties at any depth, are skipped: neither has a single scalar
+    // value to order by.
+    private void appendSortableFields(List<AdminPropertyDefinitionView> properties, String pathPrefix, List<SortableFieldView> result) {
+        if (properties == null) return;
+        for (var p : properties) {
+            if (p.cardinality() != PropertyCardinality.SINGLE) continue;
+            String path = pathPrefix + p.name();
+            if (p instanceof ObjectAdminPropertyDefinitionView object) {
+                appendSortableFields(object.properties(), path + ".", result);
+            } else {
+                result.add(new SortableFieldView(path, false));
+            }
+        }
     }
 
     // --- Admin schema ---

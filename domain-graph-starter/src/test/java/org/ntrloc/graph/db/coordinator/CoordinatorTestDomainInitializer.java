@@ -44,6 +44,8 @@ public class CoordinatorTestDomainInitializer implements DomainInitializer, Appl
     private UUID contributorNamePropertyId;
     private UUID colorPropertyId;
     private UUID rolePropertyId;
+    private UUID dimensionsWidthPropertyId;
+    private UUID dimensionsHeightPropertyId;
 
     public CoordinatorTestDomainInitializer(SchemaManager schemaManager, ControlledListManager controlledListManager) {
         this.schemaManager = schemaManager;
@@ -63,12 +65,20 @@ public class CoordinatorTestDomainInitializer implements DomainInitializer, Appl
                         property("name", PropertyType.STRING, PropertyCardinality.SINGLE),
                         property("color", PropertyType.STRING, PropertyCardinality.SINGLE),
                         property("tags", PropertyType.STRING, PropertyCardinality.SET),
-                        property("releaseDate", PropertyType.DATE, PropertyCardinality.SINGLE)), null, false, null)));
+                        property("releaseDate", PropertyType.DATE, PropertyCardinality.SINGLE),
+                        objectProperty("dimensions",
+                                property("width", PropertyType.STRING, PropertyCardinality.SINGLE),
+                                property("height", PropertyType.STRING, PropertyCardinality.SINGLE))),
+                null, false, null)));
 
         AdminItemDefinitionView product = findItem(schemaManager, "CoordinatorTestProduct");
         productTypeId = product.id();
         namePropertyId = findProperty(product.properties(), "name");
         colorPropertyId = findProperty(product.properties(), "color");
+        var dimensions = (org.ntrloc.graph.db.partition.schema.definition.view.admin.ObjectAdminPropertyDefinitionView)
+                product.properties().stream().filter(p -> p.name().equals("dimensions")).findFirst().orElseThrow();
+        dimensionsWidthPropertyId = findProperty(dimensions.properties(), "width");
+        dimensionsHeightPropertyId = findProperty(dimensions.properties(), "height");
 
         schemaManager.applyMutations(List.of(new CreateItemDefinitionMutation(
                 "CoordinatorTestContributor", "Coordinator integration test fixture",
@@ -101,6 +111,11 @@ public class CoordinatorTestDomainInitializer implements DomainInitializer, Appl
 
     private CreatePropertyDefinitionMutation property(String name, PropertyType type, PropertyCardinality cardinality) {
         return new CreatePropertyDefinitionMutation(name, "Coordinator integration test fixture", type, cardinality, PropertyUsage.OPTIONAL, false, java.util.List.of());
+    }
+
+    private CreatePropertyDefinitionMutation objectProperty(String name, CreatePropertyDefinitionMutation... children) {
+        return new CreatePropertyDefinitionMutation(name, "Coordinator integration test fixture", PropertyType.OBJECT,
+                PropertyCardinality.SINGLE, PropertyUsage.OPTIONAL, false, List.of(children));
     }
 
     private AdminItemDefinitionView findItem(SchemaManager schemaManager, String name) {
@@ -152,5 +167,13 @@ public class CoordinatorTestDomainInitializer implements DomainInitializer, Appl
 
     public UUID rolePropertyId() {
         return rolePropertyId;
+    }
+
+    public UUID dimensionsWidthPropertyId() {
+        return dimensionsWidthPropertyId;
+    }
+
+    public UUID dimensionsHeightPropertyId() {
+        return dimensionsHeightPropertyId;
     }
 }

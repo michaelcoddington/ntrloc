@@ -77,7 +77,8 @@ public class EntityManagerImpl implements EntityManager {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown item type: " + spec.itemTypeName());
         }
         var permissionContext = permissionService.buildContext(principal);
-        return registerPartitionManager.projectOne(actualItemTypeId.get(), spec.itemId(), binaryBaseUrl, spec.links(), permissionContext);
+        return registerPartitionManager.projectOne(actualItemTypeId.get(), spec.itemId(), binaryBaseUrl, spec.links(), permissionContext,
+                Boolean.TRUE.equals(spec.includePermissions()), Boolean.TRUE.equals(spec.includeStates()));
     }
 
     @Override

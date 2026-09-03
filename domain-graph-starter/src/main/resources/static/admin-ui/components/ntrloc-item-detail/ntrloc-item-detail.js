@@ -45,15 +45,13 @@ injectStyles('ntrloc-item-detail-styles', `
   .states-diagram-el .state-machine-diagram-scroll {
     flex: 1;
   }
-  .state-machines-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+  .state-machine-preview + .state-machine-preview {
+    margin-top: 20px;
   }
-  .state-machines-list li {
-    padding: 4px 0;
+  .state-machine-preview-name {
+    margin: 0 0 6px;
     font-size: 13px;
-    border-bottom: 1px solid var(--border);
+    font-weight: 600;
   }
   .markers-list {
     list-style: none;
@@ -822,22 +820,26 @@ class NtrlocItemDetail extends HTMLElement {
     const item = this._item;
     const machines = item.stateMachines.filter((m) => !m.isDeleted);
 
-    // A single machine keeps the existing full diagram preview -- still the common case. Multiple
-    // machines fall back to a compact list (a compact multi-diagram preview isn't warranted here;
-    // the full diagram for any one machine is one click away via the editor's own tab selector).
+    // A single machine keeps the existing unlabeled full diagram preview -- still the common case
+    // and there's nothing to disambiguate. Multiple machines each get their own labeled diagram,
+    // stacked, rather than a compact list -- each one keyed by machine id (data-machine-id) so
+    // updated() below can hydrate the right diagram element with the right machine's data.
     let previewHtml;
     if (machines.length === 0) {
       previewHtml = '<p class="status">No state machines defined.</p>';
     } else if (machines.length === 1) {
       previewHtml = machines[0].states.filter((s) => !s.isDeleted).length > 0
-        ? '<ntrloc-state-machine-diagram class="states-diagram-el"></ntrloc-state-machine-diagram>'
+        ? `<ntrloc-state-machine-diagram class="states-diagram-el" data-machine-id="${machines[0].id}"></ntrloc-state-machine-diagram>`
         : '<p class="status">No states defined.</p>';
     } else {
-      previewHtml = `
-        <ul class="state-machines-list">
-          ${machines.map((m) => `<li>${escapeHtml(m.name || '(unnamed)')} <span class="status">(${m.states.filter((s) => !s.isDeleted).length} states)</span></li>`).join('')}
-        </ul>
-      `;
+      previewHtml = machines.map((m) => `
+        <div class="state-machine-preview">
+          <h4 class="state-machine-preview-name">${escapeHtml(m.name || '(unnamed)')}</h4>
+          ${m.states.filter((s) => !s.isDeleted).length > 0
+            ? `<ntrloc-state-machine-diagram class="states-diagram-el" data-machine-id="${m.id}"></ntrloc-state-machine-diagram>`
+            : '<p class="status">No states defined.</p>'}
+        </div>
+      `).join('');
     }
 
     // Mirrors the Links panel's own "save this first" guard -- CreateStateMachineMutation needs a
@@ -1138,17 +1140,19 @@ class NtrlocItemDetail extends HTMLElement {
       linksTable.data = { links: item.links, propertyTypes: this._propertyTypes };
     }
 
-    const statesDiagram = this.querySelector('.states-diagram-el');
-    if (statesDiagram) {
-      // Only rendered when exactly one (non-deleted) state machine exists -- see statesBody().
-      const machine = item.stateMachines.filter((m) => !m.isDeleted)[0];
+    // One diagram element per (non-deleted, non-empty) state machine -- see statesBody(). Matched
+    // by data-machine-id rather than position since machine order isn't guaranteed stable.
+    const machinesById = new Map(item.stateMachines.filter((m) => !m.isDeleted).map((m) => [m.id, m]));
+    this.querySelectorAll('.states-diagram-el').forEach((statesDiagram) => {
+      const machine = machinesById.get(statesDiagram.dataset.machineId);
+      if (!machine) return;
       statesDiagram.data = {
         states: machine.states.filter((s) => !s.isDeleted).map((s) => ({
           ...s,
           transitions: s.transitions.filter((t) => !t.isDeleted),
         })),
       };
-    }
+    });
 
     const editStatesButton = this.querySelector('.edit-states-button');
     if (editStatesButton) editStatesButton.addEventListener('click', async () => {

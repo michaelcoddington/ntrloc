@@ -6,10 +6,13 @@ import org.ntrloc.graph.AbstractIntegrationTest;
 import org.ntrloc.graph.db.coordinator.LedgerRegisterCoordinator;
 import org.ntrloc.graph.db.mutation.ExistingItemReference;
 import org.ntrloc.graph.db.mutation.ItemCreateMutation;
+import org.ntrloc.graph.db.mutation.ItemDeleteMutation;
+import org.ntrloc.graph.db.mutation.ItemMutation;
 import org.ntrloc.graph.db.mutation.LinkCreateMutation;
 import org.ntrloc.graph.db.mutation.LinkEndpointReference;
 import org.ntrloc.graph.db.mutation.MutationRequest;
 import org.ntrloc.graph.db.mutation.MutationResponse;
+import org.ntrloc.graph.db.partition.authorization.RequestPermissionContext;
 import org.ntrloc.graph.db.partition.schema.SchemaManager;
 import org.ntrloc.graph.db.partition.schema.definition.mutation.CreateItemDefinitionMutation;
 import org.ntrloc.graph.db.partition.schema.definition.mutation.DeleteItemDefinitionMutation;
@@ -29,12 +32,14 @@ import org.ntrloc.graph.db.projection.RangeFacetFilter;
 import org.ntrloc.graph.db.projection.StateValuePredicate;
 import org.ntrloc.graph.db.projection.TermsFacetFilter;
 import org.ntrloc.graph.db.partition.ledger.ItemUpdateEntry;
+import org.ntrloc.graph.domain.DomainInitializer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -539,6 +544,94 @@ class RegisterPartitionManagerProjectionIntegrationTest extends AbstractIntegrat
     }
 
     @Test
+    void stateMachineFacet_ordersBucketsByWorkflowPositionNotCount() {
+        // Deliberately NOT the shared AVAILABILITY_MACHINE fixture -- StateMachineExecutionIntegrationTest
+        // adds its own ad-hoc transitions to that machine (GuardedRetire, Archive) and never cleans
+        // them up, since schema mutations (unlike the marker-scoped rows other tests in this file
+        // create) aren't test-scoped. That's harmless for count-based assertions but would make this
+        // test's expected order depend on suite execution order, so it gets its own throwaway item
+        // type + machine instead, torn down at the end.
+        //
+        // Graph: START -> Available -> OutOfStock -> Discontinued (plus an OutOfStock -> Available
+        // cycle back). Rank-distance from START is Available=1, OutOfStock=2, Discontinued=3 --
+        // deliberately give the *last*-ranked state the most items, so a count-based ordering (the
+        // old behavior) would produce a different, wrong order here.
+        String itemTypeName = "RegisterProjectionTestFacetOrderThrowaway";
+        String machineName = "FacetOrderMachine";
+        schemaManager.applyMutations(List.of(new CreateItemDefinitionMutation(
+                itemTypeName, "created only for stateMachineFacet ordering test", List.of(), null, false, null)));
+        UUID throwawayTypeId = schemaManager.getAdminSchema().items().stream()
+                .filter(item -> item.name().equals(itemTypeName))
+                .findFirst().orElseThrow().id();
+        List<UUID> createdItemIds = new ArrayList<>();
+        try {
+            new DomainInitializer() {}.initStateMachine(schemaManager, throwawayTypeId, machineName,
+                    List.of(
+                            new DomainInitializer.StateDefinition("Available"),
+                            new DomainInitializer.StateDefinition("OutOfStock"),
+                            new DomainInitializer.StateDefinition("Discontinued")),
+                    List.of(
+                            new DomainInitializer.TransitionDefinition(DomainInitializer.START_STATE, "Available", "start"),
+                            new DomainInitializer.TransitionDefinition("Available", "OutOfStock", "MarkOutOfStock"),
+                            new DomainInitializer.TransitionDefinition("OutOfStock", "Available", "Restock"),
+                            new DomainInitializer.TransitionDefinition("OutOfStock", "Discontinued", "Discontinue")));
+
+            UUID discontinued1 = createItem(itemTypeName);
+            UUID discontinued2 = createItem(itemTypeName);
+            UUID discontinued3 = createItem(itemTypeName);
+            UUID outOfStock = createItem(itemTypeName);
+            UUID available = createItem(itemTypeName);
+            UUID noState = createItem(itemTypeName); // never given a state -- the null bucket
+            createdItemIds.addAll(List.of(discontinued1, discontinued2, discontinued3, outOfStock, available, noState));
+            setStateForType(throwawayTypeId, discontinued1, machineName, "Discontinued");
+            setStateForType(throwawayTypeId, discontinued2, machineName, "Discontinued");
+            setStateForType(throwawayTypeId, discontinued3, machineName, "Discontinued");
+            setStateForType(throwawayTypeId, outOfStock, machineName, "OutOfStock");
+            setStateForType(throwawayTypeId, available, machineName, "Available");
+
+            var spec = new CollectionProjectionSpec(itemTypeName, null, null, null, null,
+                    null, null, List.of(machineName), null, null);
+            ProjectionResult result = registerPartitionManager.project(throwawayTypeId, spec, "http://binary");
+
+            assertThat(result.stateMachineFacets().get(machineName))
+                    .extracting(FacetBucket::label, FacetBucket::count)
+                    .containsExactly(
+                            tuple("Available", 1L),
+                            tuple("OutOfStock", 1L),
+                            tuple("Discontinued", 3L),
+                            tuple(null, 1L));
+        } finally {
+            if (!createdItemIds.isEmpty()) {
+                webTestClient.post().uri("/api/mutation")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(new MutationRequest(createdItemIds.stream().<ItemMutation>map(ItemDeleteMutation::new).toList(), List.of()))
+                        .exchange()
+                        .expectStatus().isOk();
+            }
+            schemaManager.applyMutations(List.of(new DeleteItemDefinitionMutation(throwawayTypeId)));
+        }
+    }
+
+    private UUID createItem(String itemTypeName) {
+        MutationResponse response = webTestClient.post().uri("/api/mutation")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new MutationRequest(List.of(new ItemCreateMutation(null, itemTypeName, Map.of())), List.of()))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(MutationResponse.class)
+                .returnResult().getResponseBody();
+        return response.items().get(0).itemId();
+    }
+
+    private void setStateForType(UUID itemTypeId, UUID itemId, String machineName, String stateName) {
+        UUID smId = registerPartitionManager.resolveStateMachineId(itemTypeId, machineName);
+        UUID stateId = registerPartitionManager.resolveStateId(smId, stateName);
+        UUID txn = UUID.randomUUID();
+        coordinator.prepare(List.of(new ItemUpdateEntry(itemId, Map.of(), Map.of(smId, stateId), Set.of(), Set.of(), Set.of())), txn, null);
+        coordinator.commit(txn, UUID.randomUUID());
+    }
+
+    @Test
     void invalidFacetFieldName_throwsIllegalArgumentException() {
         var spec = new CollectionProjectionSpec(BOOK_TYPE, null, null, null, null,
                 List.of("not a valid field; drop table books"), null, null, null, null);
@@ -782,6 +875,43 @@ class RegisterPartitionManagerProjectionIntegrationTest extends AbstractIntegrat
         assertThat(s.currentState()).isNull();
         assertThat(s.startable()).isTrue(); // superuser
         assertThat(s.availableTransitions()).isEmpty();
+    }
+
+    // A machine that's neither active nor startable by the caller has nothing to report -- no
+    // current state, no Start affordance -- so its entry is omitted entirely rather than surfacing
+    // as startable:false with nothing else useful in it. Non-superuser, zero grants of any kind:
+    // this bypasses EntityManagerImpl's own item:read gate (see projectOne's own comment -- that
+    // check happens one layer up, not here), which is fine since this test only cares about the
+    // states filtering, not item-level visibility.
+    @Test
+    void projection_forAnItemNotInAMachine_andNotStartable_omitsTheMachineEntirely() {
+        UUID bookId = createBook("Dune", 400, true, "Fiction");
+        var noGrants = new RequestPermissionContext(false, java.util.Set.of(), java.util.Set.of(), java.util.Set.of(),
+                java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of(),
+                java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+
+        var book = registerPartitionManager.projectOne(fixture.bookTypeId(), bookId, "http://binary", null, noGrants).orElseThrow();
+
+        assertThat(book.states()).isNull();
+    }
+
+    // ProjectionSpec.includePermissions/includeStates default to false -- a plain CollectionProjectionSpec
+    // (via its legacy constructors, which don't expose these two fields at all) must come back with
+    // both null even for an active machine and a superuser, who would otherwise always get real
+    // values for both. Distinct from the two tests above/below: this covers the opt-in mechanism
+    // itself, not the content of what's returned once opted in.
+    @Test
+    void projection_withoutIncludePermissionsOrIncludeStates_omitsBothByDefault() {
+        UUID bookId = createBook("Dune", 400, true, "Fiction");
+        setState(bookId, RegisterProjectionTestDomainInitializer.AVAILABILITY_MACHINE,
+                RegisterProjectionTestDomainInitializer.OUT_OF_STOCK);
+
+        var spec = new CollectionProjectionSpec("RegisterProjectionTestBook", null, null, null);
+        var result = registerPartitionManager.project(fixture.bookTypeId(), spec, "http://binary");
+        var book = result.items().stream().filter(i -> i.itemId().equals(bookId)).findFirst().orElseThrow();
+
+        assertThat(book.permissions()).isNull();
+        assertThat(book.states()).isNull();
     }
 
     @Test

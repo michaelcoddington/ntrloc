@@ -119,7 +119,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.grantPropertyAccess(grantId, fixture.namePropertyId(), true, false);
         // color deliberately not granted
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", principal);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
 
         assertThat(result.get().properties()).containsKey("name");
         assertThat(result.get().properties()).doesNotContainKey("color");
@@ -133,7 +133,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.grantPropertyAccess(grantId(markerOnItem(productId).id(), principal), fixture.namePropertyId(), true, false);
         authRepo.grantPropertyAccess(grantId(markerOnItem(productId).id(), principal), fixture.colorPropertyId(), true, false);
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", principal);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
 
         assertThat(result.get().properties()).containsKeys("name", "color");
     }
@@ -149,7 +149,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         // value you can't see back is not a coherent capability; the admin UI already shows read as
         // "implied by write").
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", principal);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
 
         assertThat(result.get().properties()).containsEntry("name", "Widget");
         assertThat(result.get().properties()).doesNotContainKey("color");
@@ -159,7 +159,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
     void superuserSeesAllPropertiesRegardlessOfGrants() {
         UUID productId = createProduct("Widget", "red");
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", SUPERUSER);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", SUPERUSER);
 
         assertThat(result.get().properties()).containsKeys("name", "color");
     }
@@ -174,9 +174,9 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.setItemPermissions(grantId, true, false);
         authRepo.grantPropertyAccess(grantId, fixture.namePropertyId(), false, true);
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", principal);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
 
-        assertThat(result.get().permissions().edit()).containsExactly("name");
+        assertThat(result.get().permissions().edit()).isEqualTo(Map.of("scalars", List.of("name")));
         assertThat(result.get().permissions().delete()).isFalse();
     }
 
@@ -187,19 +187,57 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         UUID grantId = grantId(markerOnItem(productId).id(), principal);
         authRepo.setItemPermissions(grantId, true, true);
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", principal);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
 
         assertThat(result.get().permissions().delete()).isTrue();
     }
 
+    // Superuser gets the real, fully-enumerated tree -- same shape as anyone else, just with every
+    // scalar wildcarded and every OBJECT child present, rather than a separate flag/shortcut.
     @Test
-    void superuserPermissions_wildcardEditAndDeleteTrue() {
+    void superuserPermissions_fullyEnumeratedEditTreeAndDeleteTrue() {
         UUID productId = createProduct("Widget", "red");
 
-        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId), "http://binary", SUPERUSER);
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", SUPERUSER);
 
-        assertThat(result.get().permissions().edit()).containsExactly("*");
+        assertThat(result.get().permissions().edit()).isEqualTo(
+                Map.of("scalars", List.of("*"), "objects", Map.of("dimensions", Map.of("scalars", List.of("*")))));
         assertThat(result.get().permissions().delete()).isTrue();
+    }
+
+    // A write grant on every scalar under a nested OBJECT property must surface as that node
+    // collapsing to the wildcard, not as the top-level container name (the original bug report
+    // this whole edit-tree design responds to) and not leaking into sibling top-level properties.
+    @Test
+    void editTreeCollapsesFullyGrantedNestedObjectToWildcard() {
+        UUID productId = createProduct("Widget", "red");
+        var principal = newUserInEveryoneGroup();
+        UUID grantId = grantId(markerOnItem(productId).id(), principal);
+        authRepo.setItemPermissions(grantId, true, false);
+        authRepo.grantPropertyAccess(grantId, fixture.dimensionsWidthPropertyId(), false, true);
+        authRepo.grantPropertyAccess(grantId, fixture.dimensionsHeightPropertyId(), false, true);
+
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
+
+        assertThat(result.get().permissions().edit()).isEqualTo(
+                Map.of("objects", Map.of("dimensions", Map.of("scalars", List.of("*")))));
+    }
+
+    // Partial coverage of a nested object's own children must name exactly the granted ones,
+    // never collapse to the wildcard, and never include the ungranted sibling.
+    @Test
+    void editTreeNamesPartiallyGrantedNestedObjectScalars() {
+        UUID productId = createProduct("Widget", "red");
+        var principal = newUserInEveryoneGroup();
+        UUID grantId = grantId(markerOnItem(productId).id(), principal);
+        authRepo.setItemPermissions(grantId, true, false);
+        authRepo.grantPropertyAccess(grantId, fixture.dimensionsWidthPropertyId(), false, true);
+        // Deliberately no grant on dimensions.height.
+
+        var result = entityManager.project(new SingleItemProjectionSpec("CoordinatorTestProduct", productId, null, true, false), "http://binary", principal);
+
+        assertThat(result.get().permissions().edit()).isEqualTo(
+                Map.of("objects", Map.of("dimensions", Map.of("scalars", List.of("width")))));
     }
 
     // --- Link property filtering and link capability, distinguished from item-level grants ---
@@ -217,7 +255,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         // Deliberately no link_property:read grant for "role".
 
         var result = entityManager.project(
-                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null))),
+                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null)), true, false),
                 "http://binary", principal);
 
         var link = result.get().links().values().stream().flatMap(List::stream).findFirst().orElseThrow();
@@ -237,7 +275,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.setItemPermissions(grantId(markerOnItem(contributorId).id(), principal), true, false);
 
         var result = entityManager.project(
-                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null))),
+                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null)), true, false),
                 "http://binary", principal);
 
         var link = result.get().links().values().stream().flatMap(List::stream).findFirst().orElseThrow();
@@ -256,7 +294,7 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.setItemPermissions(grantId(markerOnItem(contributorId).id(), principal), true, false); // target item:read only
 
         var result = entityManager.project(
-                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null))),
+                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null)), true, false),
                 "http://binary", principal);
 
         var link = result.get().links().values().stream().flatMap(List::stream).findFirst().orElseThrow();
@@ -280,11 +318,13 @@ class PropertyAndCapabilityFilteringIntegrationTest extends AbstractIntegrationT
         authRepo.setItemPermissions(grantId(markerOnItem(contributorId).id(), principal), true, false);
 
         var result = entityManager.project(
-                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null))),
+                new SingleItemProjectionSpec("CoordinatorTestProduct", productId, Map.of("products", new LinkProjectionSpec(null)), true, false),
                 "http://binary", principal);
 
         var link = result.get().links().values().stream().flatMap(List::stream).findFirst().orElseThrow();
-        assertThat(link.permissions().edit()).containsExactly("role");
-        assertThat(link.item().permissions().edit()).isEmpty();
+        // "role" is the only property the "author" link type has, so a full grant on it
+        // collapses to the wildcard, same as it would for any other fully-covered node.
+        assertThat(link.permissions().edit()).isEqualTo(Map.of("scalars", List.of("*")));
+        assertThat(link.item().permissions().edit()).isNull();
     }
 }

@@ -16,10 +16,12 @@ import org.ntrloc.graph.db.partition.schema.SchemaManager;
 import org.ntrloc.graph.db.partition.schema.definition.PropertyCardinality;
 import org.ntrloc.graph.db.partition.schema.definition.PropertyType;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminItemDefinitionView;
+import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminLinkView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminPropertyDefinitionView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminSchemaView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminStateMachineView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminStateView;
+import org.ntrloc.graph.db.partition.schema.definition.view.admin.AdminTransitionView;
 import org.ntrloc.graph.db.partition.schema.definition.view.admin.ObjectAdminPropertyDefinitionView;
 import org.ntrloc.graph.db.partition.schema.event.SchemaChangeEvent;
 import org.ntrloc.graph.db.partition.schema.event.SchemaChangeListener;
@@ -46,10 +48,13 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -331,7 +336,9 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 .findFirst()
                 .map(AdminItemDefinitionView::stateMachines)
                 .orElse(null);
-        return new ProjectionResult(assembleProjectedItems(rawItems, ownPropertyNames, stateMachines, binaryBaseUrl, spec.links(), permissions), totalCount, facetedCount, facets, stateMachineFacets);
+        var items = assembleProjectedItems(rawItems, ownPropertyNames, stateMachines, binaryBaseUrl, spec.links(), permissions,
+                Boolean.TRUE.equals(spec.includePermissions()), Boolean.TRUE.equals(spec.includeStates()));
+        return new ProjectionResult(items, totalCount, facetedCount, facets, stateMachineFacets);
     }
 
     // --- Cross-type (trait/supertype-scoped) queries ---
@@ -453,7 +460,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
         }
 
         var items = assembleProjectedItems(rawItems, mergedPropertyNames,
-                mergedStateMachines.isEmpty() ? null : mergedStateMachines, binaryBaseUrl, spec.links(), permissions);
+                mergedStateMachines.isEmpty() ? null : mergedStateMachines, binaryBaseUrl, spec.links(), permissions,
+                Boolean.TRUE.equals(spec.includePermissions()), Boolean.TRUE.equals(spec.includeStates()));
         return new ProjectionResult(items, totalCount, facetedCount, facets, stateMachineFacets);
     }
 
@@ -565,10 +573,20 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     // filter back down to this bucket) while .label carries the resolved name for display, finally
     // giving that value/label split real use (property facets today have identical value/label
     // since a property's own value already *is* its display form).
+    //
+    // Ordering isn't count-based (unlike runTermsFacetQuery) -- a state machine's states have a
+    // meaningful workflow position, so buckets are sorted by rank-distance from the START
+    // pseudostate (rankStatesByDistanceFromStart), tiebroken alphabetically by state name. A state
+    // unreachable from START (should not normally happen, but the schema doesn't forbid an orphan)
+    // sorts after every reachable state. The null-value bucket -- items that have never entered this
+    // machine at all -- has no position in the graph, so it always sorts last, regardless of count.
     private List<FacetBucket> runStateMachineFacetQuery(String tableName, UUID itemTypeId, SqlFragment filter, String stateMachineName) {
         UUID stateMachineId = resolveStateMachineId(itemTypeId, stateMachineName);
-        Map<UUID, String> stateNames = stateNamesByIdForMachine(stateMachineId);
-        return jdbcClient.sql("""
+        AdminStateMachineView machine = stateMachineView(stateMachineId);
+        Map<UUID, String> stateNames = machine.states().stream()
+                .collect(Collectors.toMap(AdminStateView::id, AdminStateView::name));
+        Map<UUID, Integer> rankByStateId = rankStatesByDistanceFromStart(machine);
+        List<FacetBucket> buckets = jdbcClient.sql("""
                 SELECT (rt.states::jsonb)->'%s'->>'currentStateId' AS value, COUNT(*) AS count
                 FROM register_item ri
                 JOIN %s rt ON rt.register_item_id = ri.id
@@ -576,7 +594,6 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                   AND ri.state = 'COMMITTED'
                   %s
                 GROUP BY (rt.states::jsonb)->'%s'->>'currentStateId'
-                ORDER BY count DESC, value ASC NULLS LAST
                 """.formatted(stateMachineId, tableName, filter.sql(), stateMachineId))
                 .param(PARAM_ITEM_TYPE_ID, itemTypeId)
                 .params(filter.params())
@@ -586,15 +603,51 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                     return new FacetBucket(stateId, label, rs.getLong(COL_FACET_COUNT));
                 })
                 .list();
+        Comparator<FacetBucket> byWorkflowPosition = Comparator
+                .comparing((FacetBucket b) -> b.value() == null)
+                .thenComparing(b -> b.value() == null ? Integer.MAX_VALUE
+                        : rankByStateId.getOrDefault(UUID.fromString(b.value()), Integer.MAX_VALUE))
+                .thenComparing(b -> b.label() == null ? "" : b.label(), String.CASE_INSENSITIVE_ORDER);
+        return buckets.stream().sorted(byWorkflowPosition).toList();
     }
 
-    private Map<UUID, String> stateNamesByIdForMachine(UUID stateMachineId) {
+    private AdminStateMachineView stateMachineView(UUID stateMachineId) {
         return schemaManager.getAdminSchema().items().stream()
                 .flatMap(item -> Optional.ofNullable(item.stateMachines()).orElse(List.of()).stream())
                 .filter(m -> m.id().equals(stateMachineId))
                 .findFirst()
-                .map(m -> m.states().stream().collect(Collectors.toMap(AdminStateView::id, AdminStateView::name)))
-                .orElse(Map.of());
+                .orElseThrow(() -> new IllegalArgumentException("Unknown state machine: " + stateMachineId));
+    }
+
+    // BFS distance from the machine's START pseudostate, one hop per transition. A machine's states
+    // form a graph, not a line (branches are normal, and re-entry after END is valid so cycles are
+    // possible too) -- this is a best-effort rank, not a true total order, but it matches how the
+    // diagram itself lays states out and needs no schema change to compute.
+    private Map<UUID, Integer> rankStatesByDistanceFromStart(AdminStateMachineView machine) {
+        Map<UUID, Integer> distanceByStateId = new HashMap<>();
+        Optional<AdminStateView> start = machine.states().stream()
+                .filter(s -> STATE_KIND_START.equals(s.kind()))
+                .findFirst();
+        if (start.isEmpty()) {
+            return distanceByStateId;
+        }
+        Map<UUID, List<UUID>> outgoingByStateId = machine.states().stream()
+                .collect(Collectors.toMap(AdminStateView::id,
+                        s -> s.transitions().stream().map(AdminTransitionView::toStateId).toList()));
+        Deque<UUID> frontier = new ArrayDeque<>();
+        distanceByStateId.put(start.get().id(), 0);
+        frontier.add(start.get().id());
+        while (!frontier.isEmpty()) {
+            UUID current = frontier.poll();
+            int nextDistance = distanceByStateId.get(current) + 1;
+            for (UUID next : outgoingByStateId.getOrDefault(current, List.of())) {
+                if (!distanceByStateId.containsKey(next)) {
+                    distanceByStateId.put(next, nextDistance);
+                    frontier.add(next);
+                }
+            }
+        }
+        return distanceByStateId;
     }
 
     private SqlFragment buildFacetFilterFragment(FacetFilter facetFilter, UUID itemTypeId, AtomicInteger counter) {
@@ -655,6 +708,17 @@ public class RegisterPartitionManager implements SchemaChangeListener {
         return projectOne(itemTypeId, itemId, binaryBaseUrl, requestedLinks, RequestPermissionContext.forSuperuser());
     }
 
+    // Kept at "always include everything" -- unlike ProjectionSpec's HTTP-facing "default false"
+    // policy (see its own comment), this overload has no spec to consult and predates
+    // includePermissions/includeStates entirely; it's what every direct-Java caller (mostly tests)
+    // already relied on. EntityManagerImpl.projectOne, the real HTTP-facing caller, goes through
+    // the 7-arg overload below instead, with real flags read off the caller's own spec.
+    public Optional<ProjectedItem> projectOne(UUID itemTypeId, UUID itemId, String binaryBaseUrl,
+                                               @Nullable Map<String, LinkProjectionSpec> requestedLinks,
+                                               RequestPermissionContext permissions) {
+        return projectOne(itemTypeId, itemId, binaryBaseUrl, requestedLinks, permissions, true, true);
+    }
+
     // permissions here only filters this item's *links* (see fetchLinksByItem) -- the item's own
     // existence isn't gated by this method at all, deliberately: unlike a paginated collection,
     // there's no totalCount/pagination correctness that requires it to be baked into this query,
@@ -663,7 +727,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     // since a denied request never pays for fetching the item's own (possibly large) properties.
     public Optional<ProjectedItem> projectOne(UUID itemTypeId, UUID itemId, String binaryBaseUrl,
                                                @Nullable Map<String, LinkProjectionSpec> requestedLinks,
-                                               RequestPermissionContext permissions) {
+                                               RequestPermissionContext permissions,
+                                               boolean includePermissions, boolean includeStates) {
         List<RawItem> rawItems = jdbcClient.sql("""
                 SELECT ri.id AS register_item_id, ri.item_id, si.name AS item_type, rt.properties::text AS properties, rt.states::text AS states
                 FROM register_item ri
@@ -692,7 +757,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 .findFirst()
                 .map(AdminItemDefinitionView::stateMachines)
                 .orElse(null);
-        return Optional.of(assembleProjectedItems(rawItems, ownPropertyNames, stateMachines, binaryBaseUrl, requestedLinks, permissions).get(0));
+        return Optional.of(assembleProjectedItems(rawItems, ownPropertyNames, stateMachines, binaryBaseUrl, requestedLinks, permissions,
+                includePermissions, includeStates).get(0));
     }
 
     // --- Write side: staged at prepare (UNCOMMITTED), flipped/cleaned up at commit/abort ---
@@ -1064,44 +1130,120 @@ public class RegisterPartitionManager implements SchemaChangeListener {
         return filtered;
     }
 
-    // edit is the writable property *names* (top-level key only, even for a nested OBJECT
-    // property's sub-fields -- write granularity below the top-level property isn't modeled),
-    // delete is a plain capability flag. Superuser short-circuits to the existing wildcard/true
-    // convention rather than resolving anything.
+    // edit is a nested tree mirroring the item type's own property structure -- see
+    // ProjectedItemPermissions' own comment for the exact shape and why. delete is a plain
+    // capability flag. Superuser goes through the same buildEditTree walk as everyone else
+    // (buildFullEditTree just never has to check a granted-id set to know the answer is "yes") --
+    // no shortcut, so edit's shape never depends on who's asking.
     private ProjectedItemPermissions buildPermissions(RequestPermissionContext permissions, Set<UUID> markerIds,
                                                         Map<UUID, Set<UUID>> writeGrantsByMarker, Set<UUID> deleteGrantedMarkerIds,
-                                                        Map<UUID, List<String>> ownPropertyNames) {
+                                                        List<AdminPropertyDefinitionView> rootProperties) {
         if (permissions.superuser()) {
-            return new ProjectedItemPermissions(List.of("*"), true);
+            return new ProjectedItemPermissions(buildFullEditTree(rootProperties), true);
         }
-        List<String> editNames = unionGrantedIds(markerIds, writeGrantsByMarker).stream()
-                .map(ownPropertyNames::get)
-                .filter(Objects::nonNull)
-                .map(path -> path.get(0))
-                .distinct()
-                .toList();
+        Set<UUID> grantedIds = unionGrantedIds(markerIds, writeGrantsByMarker);
+        Map<String, Object> edit = grantedIds.isEmpty() ? null : buildEditTree(rootProperties, grantedIds);
         boolean canDelete = !Collections.disjoint(markerIds, deleteGrantedMarkerIds);
-        return new ProjectedItemPermissions(editNames, canDelete);
+        return new ProjectedItemPermissions(edit, canDelete);
+    }
+
+    // Bottom-up: a node whose own scalar children are ALL granted collapses its "scalars" entry to
+    // ["*"] rather than naming each one; an OBJECT child with nothing writable anywhere beneath it
+    // is omitted from "objects" entirely, same as a fully-uncovered node returns null and is
+    // omitted by its own parent. See ProjectedItemPermissions for why a fully-covered OBJECT child
+    // is NOT itself collapsed to a bare "*" or similar -- every node keeps the same {scalars,
+    // objects} shape regardless of how much of it is granted.
+    private Map<String, Object> buildEditTree(List<AdminPropertyDefinitionView> properties, Set<UUID> grantedIds) {
+        List<String> grantedScalarNames = new ArrayList<>();
+        int totalScalarCount = 0;
+        Map<String, Object> objectChildren = new LinkedHashMap<>();
+
+        for (AdminPropertyDefinitionView p : properties) {
+            if (p instanceof ObjectAdminPropertyDefinitionView o) {
+                Map<String, Object> childNode = buildEditTree(o.properties(), grantedIds);
+                if (childNode != null) objectChildren.put(o.name(), childNode);
+            } else {
+                totalScalarCount++;
+                if (grantedIds.contains(p.id())) grantedScalarNames.add(p.name());
+            }
+        }
+
+        if (grantedScalarNames.isEmpty() && objectChildren.isEmpty()) return null;
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        if (!grantedScalarNames.isEmpty()) {
+            node.put("scalars", grantedScalarNames.size() == totalScalarCount ? List.of("*") : List.copyOf(grantedScalarNames));
+        }
+        if (!objectChildren.isEmpty()) {
+            node.put("objects", objectChildren);
+        }
+        return node;
+    }
+
+    // Superuser's counterpart to buildEditTree -- every scalar is granted by definition, so this
+    // never needs a granted-id set, but keeps the identical {scalars, objects} shape (always "*",
+    // never a per-name list) so a client can't tell which principal it's looking at from edit's
+    // shape alone. Only returns null for a node with no properties at all, which real schema
+    // content never produces.
+    private Map<String, Object> buildFullEditTree(List<AdminPropertyDefinitionView> properties) {
+        List<String> scalarNames = new ArrayList<>();
+        Map<String, Object> objectChildren = new LinkedHashMap<>();
+
+        for (AdminPropertyDefinitionView p : properties) {
+            if (p instanceof ObjectAdminPropertyDefinitionView o) {
+                Map<String, Object> childNode = buildFullEditTree(o.properties());
+                if (childNode != null) objectChildren.put(o.name(), childNode);
+            } else {
+                scalarNames.add(p.name());
+            }
+        }
+
+        if (scalarNames.isEmpty() && objectChildren.isEmpty()) return null;
+
+        Map<String, Object> node = new LinkedHashMap<>();
+        if (!scalarNames.isEmpty()) node.put("scalars", List.of("*"));
+        if (!objectChildren.isEmpty()) node.put("objects", objectChildren);
+        return node;
+    }
+
+    private List<AdminPropertyDefinitionView> rootPropertiesForItemTypeName(String itemTypeName) {
+        return schemaManager.getAdminSchema().items().stream()
+                .filter(item -> item.name().equals(itemTypeName))
+                .findFirst()
+                .map(AdminItemDefinitionView::properties)
+                .orElse(List.of());
+    }
+
+    private List<AdminPropertyDefinitionView> rootPropertiesForItemType(UUID itemTypeId) {
+        return schemaManager.getAdminSchema().items().stream()
+                .filter(item -> item.id().equals(itemTypeId))
+                .findFirst()
+                .map(AdminItemDefinitionView::properties)
+                .orElse(List.of());
+    }
+
+    private List<AdminPropertyDefinitionView> rootPropertiesForLinkType(UUID linkTypeId) {
+        return schemaManager.getAdminSchema().links().stream()
+                .filter(link -> link.id().equals(linkTypeId))
+                .findFirst()
+                .map(AdminLinkView::properties)
+                .orElse(List.of());
     }
 
     // A link's own permissions differ from buildPermissions' shape in exactly one way: delete is
     // perspective-keyed (marker_grant_link_perspective.can_delete), not a flat marker set, since
     // link:delete is anchored to the source item's marker via the specific perspective traversed --
-    // same reasoning as link:read's own filtering above. Edit (link_property:write) stays flat,
-    // since link properties aren't perspective-scoped (symmetric regardless of viewing side).
+    // same reasoning as link:read's own filtering above. Edit (link_property:write) uses the same
+    // tree shape as buildPermissions, since link properties can themselves be OBJECT-typed too.
     private ProjectedItemPermissions buildLinkPermissions(RequestPermissionContext permissions, Set<UUID> sourceMarkerIds, UUID perspectiveId,
-                                                            Map<UUID, List<String>> linkPropertyNames) {
+                                                            List<AdminPropertyDefinitionView> linkRootProperties) {
         if (permissions.superuser()) {
-            return new ProjectedItemPermissions(List.of("*"), true);
+            return new ProjectedItemPermissions(buildFullEditTree(linkRootProperties), true);
         }
-        List<String> editNames = unionGrantedIds(sourceMarkerIds, permissions.linkPropertyWriteGrantsByMarker()).stream()
-                .map(linkPropertyNames::get)
-                .filter(Objects::nonNull)
-                .map(path -> path.get(0))
-                .distinct()
-                .toList();
+        Set<UUID> grantedIds = unionGrantedIds(sourceMarkerIds, permissions.linkPropertyWriteGrantsByMarker());
+        Map<String, Object> edit = grantedIds.isEmpty() ? null : buildEditTree(linkRootProperties, grantedIds);
         boolean canDelete = unionGrantedIds(sourceMarkerIds, permissions.linkPerspectiveDeleteGrantsByMarker()).contains(perspectiveId);
-        return new ProjectedItemPermissions(editNames, canDelete);
+        return new ProjectedItemPermissions(edit, canDelete);
     }
 
     public record RegisterLinkedItem(UUID linkId, UUID connectedItemId) {
@@ -1413,7 +1555,7 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     // or with a spec whose own `links` is null/empty, simply doesn't recurse further.
     private Map<UUID, Map<String, List<ProjectedLink>>> fetchLinksByItem(
             List<UUID> myRegisterItemIds, @Nullable Map<String, LinkProjectionSpec> requestedLinks,
-            RequestPermissionContext permissions) {
+            RequestPermissionContext permissions, boolean includePermissions) {
         if (myRegisterItemIds.isEmpty() || (requestedLinks != null && requestedLinks.isEmpty())) {
             return Map.of();
         }
@@ -1511,17 +1653,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 COL_REGISTER_LINK_ID, linkOwnerMarkerIds, permissions.superuser() ? null
                         : readImpliedByWrite(permissions.linkPropertyReadGrantsByMarker(), permissions.linkPropertyWriteGrantsByMarker()));
 
-        // Merged across every distinct type/link-definition in this batch -- safe since property
-        // ids are globally unique across the whole schema (same reasoning projectAcrossTypes'
-        // mergedPropertyNames already relies on), needed because buildPermissions' edit-name
-        // resolution needs the *linked* item's/link's own property names, not the outer item's.
-        Map<UUID, List<String>> linkedItemPropertyNames = mergedPropertyPathsForItemTypes(
-                linkRows.stream().map(LinkRow::linkedItemTypeId).collect(Collectors.toSet()));
-        Map<UUID, List<String>> linkPropertyNames = mergedPropertyPathsForLinkTypes(
-                linkRows.stream().map(LinkRow::linkDefinitionId).collect(Collectors.toSet()));
-
         Map<UUID, Map<String, List<ProjectedLink>>> nestedLinksByLinkedRegisterItemId = requestedLinks != null
-                ? fetchNestedLinksForRequestedPerspectives(linkRows, requestedLinks, permissions)
+                ? fetchNestedLinksForRequestedPerspectives(linkRows, requestedLinks, permissions, includePermissions)
                 : Map.of();
 
         Map<String, String> displayLabelPatterns = resolveEffectiveDisplayLabelPatterns();
@@ -1548,33 +1681,29 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                                                 linkedProps,
                                                 finalNestedLinks.getOrDefault(row.linkedRegisterItemId(), Map.of()),
                                                 null,
-                                                buildPermissions(permissions, linkedItemOwnMarkerIds,
-                                                        permissions.propertyWriteGrantsByMarker(), permissions.itemDeleteGrantedMarkerIds(), linkedItemPropertyNames),
+                                                includePermissions
+                                                        ? buildPermissions(permissions, linkedItemOwnMarkerIds,
+                                                                permissions.propertyWriteGrantsByMarker(), permissions.itemDeleteGrantedMarkerIds(),
+                                                                rootPropertiesForItemType(row.linkedItemTypeId()))
+                                                        : null,
                                                 computeDisplayLabel(row.linkedItemId(), linkedProps, displayLabelPatterns.get(row.linkedItemType())),
                                                 null), // markers: not populated for a linked item yet -- see ProjectedItem's own comment
-                                        buildLinkPermissions(permissions, mySourceMarkerIds, row.perspectiveId(), linkPropertyNames)
+                                        includePermissions
+                                                ? buildLinkPermissions(permissions, mySourceMarkerIds, row.perspectiveId(),
+                                                        rootPropertiesForLinkType(row.linkDefinitionId()))
+                                                : null
                                     );
                                 },
                                 Collectors.toList()))));
     }
 
-    private Map<UUID, List<String>> mergedPropertyPathsForItemTypes(Collection<UUID> itemTypeIds) {
-        Map<UUID, List<String>> merged = new HashMap<>();
-        for (UUID typeId : itemTypeIds) merged.putAll(propertyPathsByIdForItemType(typeId));
-        return merged;
-    }
-
-    private Map<UUID, List<String>> mergedPropertyPathsForLinkTypes(Collection<UUID> linkDefinitionIds) {
-        Map<UUID, List<String>> merged = new HashMap<>();
-        for (UUID defId : linkDefinitionIds) merged.putAll(propertyPathsByIdForLinkType(defId));
-        return merged;
-    }
 
     // Extracted from fetchLinksByItem purely to keep that method's own cognitive complexity down --
     // one more batched round trip per requested perspective that itself names further nested links,
     // never per item (fetchLinksByItem's own comment on why that's the scaling property that matters).
     private Map<UUID, Map<String, List<ProjectedLink>>> fetchNestedLinksForRequestedPerspectives(
-            List<LinkRow> linkRows, Map<String, LinkProjectionSpec> requestedLinks, RequestPermissionContext permissions) {
+            List<LinkRow> linkRows, Map<String, LinkProjectionSpec> requestedLinks, RequestPermissionContext permissions,
+            boolean includePermissions) {
         Map<String, List<LinkRow>> rowsByPerspective = linkRows.stream()
                 .collect(Collectors.groupingBy(LinkRow::perspectiveName));
         Map<UUID, Map<String, List<ProjectedLink>>> nested = new HashMap<>();
@@ -1588,7 +1717,7 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                     .map(LinkRow::linkedRegisterItemId).distinct().toList();
             // registerItemId is globally unique across every item type, so merging per-perspective
             // results here is safe even if two requested perspectives happened to reach the same item.
-            nested.putAll(fetchLinksByItem(childRegisterItemIds, childLinks, permissions));
+            nested.putAll(fetchLinksByItem(childRegisterItemIds, childLinks, permissions, includePermissions));
         }
         return nested;
     }
@@ -1602,7 +1731,8 @@ public class RegisterPartitionManager implements SchemaChangeListener {
     private List<ProjectedItem> assembleProjectedItems(List<RawItem> rawItems, Map<UUID, List<String>> ownPropertyNames,
                                                          List<AdminStateMachineView> stateMachines, String binaryBaseUrl,
                                                          @Nullable Map<String, LinkProjectionSpec> requestedLinks,
-                                                         RequestPermissionContext permissions) {
+                                                         RequestPermissionContext permissions,
+                                                         boolean includePermissions, boolean includeStates) {
         // Nothing to assemble -- and every batch fetch below binds `... IN (:ids)`, which Postgres
         // rejects as a syntax error when the list is empty. A page whose offset lands past the last
         // row (offset >= totalCount) reaches here with an empty list; it must come back as [], not 500.
@@ -1610,7 +1740,7 @@ public class RegisterPartitionManager implements SchemaChangeListener {
         List<UUID> rawItemIds = rawItems.stream().map(RawItem::registerItemId).toList();
         Map<String, String> displayLabelPatterns = resolveEffectiveDisplayLabelPatterns();
 
-        Map<UUID, Map<String, List<ProjectedLink>>> linksByItem = fetchLinksByItem(rawItemIds, requestedLinks, permissions);
+        Map<UUID, Map<String, List<ProjectedLink>>> linksByItem = fetchLinksByItem(rawItemIds, requestedLinks, permissions, includePermissions);
         // A superuser used to skip this fetch entirely (nothing to filter by), but now also needs
         // it to populate ProjectedItem.markers -- so it's unconditional regardless of who's asking.
         Map<UUID, Set<UUID>> markerIdsByRegisterItemId = getMarkerIdsForRegisterItems(rawItemIds);
@@ -1656,7 +1786,7 @@ public class RegisterPartitionManager implements SchemaChangeListener {
 
         AssemblyContext ctx = new AssemblyContext(ownPropertyNames, stateMachines, displayLabelPatterns,
                 linksByItem, markerIdsByRegisterItemId, binaryPropsByItem, effectiveReadGrants,
-                markerNamesById, permissions);
+                markerNamesById, permissions, includePermissions, includeStates);
         return rawItems.stream().map(raw -> assembleProjectedItem(raw, ctx)).toList();
     }
 
@@ -1669,7 +1799,9 @@ public class RegisterPartitionManager implements SchemaChangeListener {
             Map<UUID, List<AssembledBinary>> binaryPropsByItem,
             @Nullable Map<UUID, Set<UUID>> effectiveReadGrants,
             Map<UUID, String> markerNamesById,
-            RequestPermissionContext permissions) {}
+            RequestPermissionContext permissions,
+            boolean includePermissions,
+            boolean includeStates) {}
 
     private ProjectedItem assembleProjectedItem(RawItem raw, AssemblyContext ctx) {
         Set<UUID> markerIds = ctx.markerIdsByRegisterItemId().getOrDefault(raw.registerItemId(), Set.of());
@@ -1687,9 +1819,11 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 }
             }
         }
-        var itemPermissions = buildPermissions(ctx.permissions(), markerIds,
-                ctx.permissions().propertyWriteGrantsByMarker(), ctx.permissions().itemDeleteGrantedMarkerIds(),
-                ctx.ownPropertyNames());
+        var itemPermissions = ctx.includePermissions()
+                ? buildPermissions(ctx.permissions(), markerIds,
+                        ctx.permissions().propertyWriteGrantsByMarker(), ctx.permissions().itemDeleteGrantedMarkerIds(),
+                        rootPropertiesForItemTypeName(raw.itemType()))
+                : null;
         // Superuser sees every marker on the item; anyone else sees only the ones they hold an
         // item:read grant on -- never the mere existence of markers they can't read.
         Set<UUID> disclosableMarkerIds = ctx.permissions().superuser()
@@ -1702,15 +1836,18 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 raw.itemType(),
                 props,
                 ctx.linksByItem().getOrDefault(raw.registerItemId(), Map.of()),
-                buildProjectedItemStates(raw.states(), ctx.stateMachines(), markerIds, ctx.permissions()),
+                ctx.includeStates() ? buildProjectedItemStates(raw.states(), ctx.stateMachines(), markerIds, ctx.permissions()) : null,
                 itemPermissions,
                 computeDisplayLabel(raw.itemId(), props, ctx.displayLabelPatterns().get(raw.itemType())),
                 markerNames);
     }
 
-    // One ProjectedItemState per state machine on the item's type (null only when the type has no
-    // machines at all). Active machines carry currentState + the outgoing transitions the principal
-    // may execute; inactive ones carry startable (may the principal begin it).
+    // One ProjectedItemState per state machine that's either active on this item, or inactive but
+    // startable by this principal -- a machine that's neither (inactive, and this principal holds
+    // no state-machine:start grant for it) has nothing to tell the caller: no current state to
+    // report, no Start affordance to offer, so its entry is omitted entirely, same "absence means
+    // nothing" convention buildEditTree uses. Returns null (not an empty map) when nothing survives
+    // that filter -- either the type has no machines at all, or every machine on it does.
     private Map<String, ProjectedItemState> buildProjectedItemStates(Map<String, Object> statesById,
             List<AdminStateMachineView> stateMachines, Set<UUID> markerIds, RequestPermissionContext permissions) {
         if (stateMachines == null || stateMachines.isEmpty()) {
@@ -1737,13 +1874,15 @@ public class RegisterPartitionManager implements SchemaChangeListener {
                 result.put(machine.name(), new ProjectedItemState(cs.name(), null, false, available));
             } else {
                 boolean startable = permissions.superuser() || startGrantedSmIds.contains(machine.id());
+                if (!startable) continue;
                 result.put(machine.name(), new ProjectedItemState(null, null, startable, List.of()));
             }
         }
-        return result;
+        return result.isEmpty() ? null : result;
     }
 
     private static final String STATE_KIND_NORMAL = "NORMAL";
+    private static final String STATE_KIND_START = "START";
 
     // The item's current AdminStateView in this machine, or empty when the machine isn't active
     // (or the recorded state id no longer exists in the schema -- a dangling id is dropped, same

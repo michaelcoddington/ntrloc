@@ -36,8 +36,20 @@ public record CollectionProjectionSpec(
         // null -- today's plain single-hop link behavior, unchanged. Non-null -- only the named
         // perspectives, recursing into whichever entries carry their own nested links. See
         // LinkProjectionSpec.
-        @Nullable Map<String, LinkProjectionSpec> links
+        @Nullable Map<String, LinkProjectionSpec> links,
+        // See ProjectionSpec's own comment -- both default to false (null) rather than true.
+        @Nullable Boolean includePermissions,
+        @Nullable Boolean includeStates
 ) implements ProjectionSpec {
+
+    // Preserves every existing 11-arg call site (this was the canonical constructor before
+    // includePermissions/includeStates were added) -- both default to null.
+    public CollectionProjectionSpec(String itemTypeName, @Nullable String traitName, @Nullable String sortField,
+            @Nullable String sortDirection, @Nullable Predicate filter, @Nullable List<String> facets,
+            @Nullable List<FacetFilter> facetFilters, @Nullable List<String> stateMachineFacets,
+            @Nullable Integer offset, @Nullable Integer limit, @Nullable Map<String, LinkProjectionSpec> links) {
+        this(itemTypeName, traitName, sortField, sortDirection, filter, facets, facetFilters, stateMachineFacets, offset, limit, links, null, null);
+    }
 
     // Preserves every existing 10-arg call site (this was the canonical/only constructor before
     // links was added) -- links defaults to null.

@@ -127,6 +127,135 @@ injectStyles('ntrloc-search-styles', `
     flex: 1;
     min-width: 140px;
   }
+  /* A hand-rolled dropdown, not md-outlined-select -- see renderFieldPicker's own comment for why
+     (a native/Material select can't render non-selectable indented group headers plus an inline
+     search box at arbitrary nesting depth). Sized/styled to sit inline with .query-select. */
+  .field-picker {
+    position: relative;
+    flex: 1;
+    min-width: 140px;
+  }
+  .field-picker-toggle {
+    width: 100%;
+    text-align: left;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .field-picker-toggle:hover {
+    border-color: var(--accent);
+  }
+  .field-picker-popup {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    max-height: 320px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+  .field-picker-search {
+    flex-shrink: 0;
+    margin: 6px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .field-tree-list {
+    overflow-y: auto;
+    padding-bottom: 4px;
+  }
+  .field-tree-none {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 6px 12px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-style: italic;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .field-tree-none:hover, .field-tree-leaf:hover {
+    background: var(--bg);
+  }
+  /* Container rows -- plain labels, never clickable (an OBJECT property is never itself a valid
+     sort/filter target, only its scalar leaves are -- see SortableFieldView). */
+  .field-tree-group {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .field-tree-leaf {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 6px 12px;
+    border: none;
+    background: none;
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .field-tree-empty {
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .filter-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .filter-op {
+    font-size: 13px;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .filter-value-input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .filter-remove-button {
+    flex-shrink: 0;
+  }
+  .add-filter-button {
+    align-self: flex-start;
+  }
   .results-summary {
     font-size: 12px;
     color: var(--muted);
@@ -781,6 +910,12 @@ injectStyles('ntrloc-search-styles', `
   }
 `);
 
+// Mirrors RegisterPartitionManager.DEFAULT_LIMIT -- the backend always applies this page size
+// when a query's limit is null, it never returns every matching row unbounded. Pagination
+// decisions here must use this as the effective page size whenever pane.pageSize itself is
+// null, or Next/Prev and the "X of Y" summary silently go blind past the first page.
+const DEFAULT_PAGE_SIZE = 50;
+
 // Recreates the Angular search screen: a toolbar to add panes, and a grid of independent
 // search panes (item-type picker + optional sort + Project button + results). Mirrors
 // SearchViewModel/SearchPaneViewModel's behavior (one pane can be maximized at a time,
@@ -817,6 +952,13 @@ class NtrlocSearch extends HTMLElement {
     // type's supertypeId chain (which only carries ids, never names) up to whatever type a
     // perspective's targets actually declare.
     this.itemTypesById = new Map();
+    // Which field-picker popup (sort or a specific filter row's) is currently open, as an opaque
+    // key string -- see renderFieldPicker. At most one at a time across every pane, same as a
+    // native <select> only ever has one open dropdown regardless of how many selects are on the
+    // page. Never persisted per-pane: closing on any full re-render this component itself doesn't
+    // trigger while a popup is open (a background schema change, say) is an acceptable, rare edge
+    // case rather than something worth threading into every pane's own state.
+    this.openFieldPicker = null;
   }
 
   connectedCallback() {
@@ -824,9 +966,32 @@ class NtrlocSearch extends HTMLElement {
     // Keeps every open pane's dropdown live as the schema changes elsewhere -- previously each
     // pane's availableTypes was fetched once, at creation, and frozen from then on.
     this._unsubscribeSchema = onGlobalSchemaChange(() => this.refreshAvailableTypesFromGlobalSchema());
+    // Closes any open field-picker popup on an outside click/Escape -- same UX contract a native
+    // <select> gives for free, which a hand-rolled popup has to wire up itself. Deliberately
+    // bubble-phase, not capture: capture would run (and re-render, tearing down the clicked node)
+    // *before* the actual click target's own handler gets a chance to fire, silently eating
+    // whatever the user was really clicking on outside the popup. Bubble-phase runs after, and
+    // closest() on an already-detached node (if that handler itself re-rendered) still walks its
+    // old, structurally-intact parent chain, so this stays correct either way.
+    this._onDocumentClickForFieldPicker = (e) => {
+      if (this.openFieldPicker && !e.target.closest('.field-picker')) {
+        this.openFieldPicker = null;
+        this.render();
+      }
+    };
+    this._onDocumentKeydownForFieldPicker = (e) => {
+      if (e.key === 'Escape' && this.openFieldPicker) {
+        this.openFieldPicker = null;
+        this.render();
+      }
+    };
+    document.addEventListener('click', this._onDocumentClickForFieldPicker);
+    document.addEventListener('keydown', this._onDocumentKeydownForFieldPicker);
   }
 
   disconnectedCallback() {
+    document.removeEventListener('click', this._onDocumentClickForFieldPicker);
+    document.removeEventListener('keydown', this._onDocumentKeydownForFieldPicker);
     if (this._unsubscribeSchema) this._unsubscribeSchema();
   }
 
@@ -840,11 +1005,18 @@ class NtrlocSearch extends HTMLElement {
       sortableFields: [],
       selectedSortField: null,
       selectedSortDirection: 'ASC',
-      // null = no limit (server returns everything). A positive integer caps the page; the
-      // projection's totalCount is still surfaced so it's obvious how many rows were held back.
+      // { field: string|null, value: string }[] -- AND-ed equality filters, staged until the next
+      // Project click, same as sort/pageSize below. field is a possibly-dotted property path (see
+      // sortableFields), never a system field -- PropertyValuePredicate only resolves real schema
+      // properties (RegisterPartitionManager.resolvePropertyId), not itemId/createdAt/etc.
+      filters: [],
+      // null = user hasn't set one; the backend still paginates in that case
+      // (RegisterPartitionManager.DEFAULT_LIMIT, mirrored here as DEFAULT_PAGE_SIZE) rather than
+      // ever returning every matching row. A positive integer overrides that default page size.
       pageSize: null,
-      // Row index the current page starts at. Only meaningful with a pageSize; reset to 0 whenever
-      // the query shape changes (type / sort / page size / a fresh Project click).
+      // Row index the current page starts at -- always meaningful, even without an explicit
+      // pageSize, since the backend paginates by DEFAULT_PAGE_SIZE regardless. Reset to 0 whenever
+      // the query shape changes (type / sort / page size / filters / a fresh Project click).
       pageOffset: 0,
       results: [],
       isLoading: false,
@@ -972,6 +1144,7 @@ class NtrlocSearch extends HTMLElement {
     pane.lastTotalCount = null;
     pane.selectedSortField = null;
     pane.selectedSortDirection = 'ASC';
+    pane.filters = [];
     pane.pageSize = null;
     pane.pageOffset = 0;
     pane.editingItems = {};
@@ -996,6 +1169,48 @@ class NtrlocSearch extends HTMLElement {
     this.render();
   }
 
+  addFilter(id) {
+    const pane = this.pane(id);
+    pane.filters = [...pane.filters, { field: null, value: '' }];
+    pane.pageOffset = 0;
+    this.render();
+  }
+
+  removeFilter(id, index) {
+    const pane = this.pane(id);
+    pane.filters = pane.filters.filter((_, i) => i !== index);
+    pane.pageOffset = 0;
+    this.render();
+  }
+
+  setFilterField(id, index, field) {
+    const pane = this.pane(id);
+    pane.filters[index].field = field || null;
+    pane.pageOffset = 0;
+    this.render();
+  }
+
+  // No re-render, same reasoning as setPageSize below: this fires on a text input's own change
+  // event, and tearing the DOM down mid-edit would fight the user typing into it.
+  setFilterValue(id, index, value) {
+    const pane = this.pane(id);
+    pane.filters[index].value = value;
+    pane.pageOffset = 0;
+  }
+
+  // AND-ed PROPERTY_VALUE/EQUALS predicates, one per filter row that has both a field and a
+  // non-empty value -- matches org.ntrloc.graph.db.projection's Predicate/PropertyValuePredicate/
+  // AndPredicate JSON shape exactly (Jackson's @JsonTypeInfo "type" discriminator). A single
+  // qualifying row is sent unwrapped rather than as a one-element AND, purely to keep the payload
+  // minimal; the backend would accept either shape identically.
+  buildFilterPredicate(pane) {
+    const rows = (pane.filters || [])
+        .filter(f => f.field && f.value !== '' && f.value != null)
+        .map(f => ({ type: 'PROPERTY_VALUE', propertyName: f.field, operator: 'EQUALS', value: f.value }));
+    if (rows.length === 0) return undefined;
+    return rows.length === 1 ? rows[0] : { type: 'AND', predicates: rows };
+  }
+
   // Stored, not applied, until the next Project -- same as the sort controls. No re-render: the
   // caller normalizes the field's displayed value itself so results aren't torn down mid-tweak.
   setPageSize(id, value) {
@@ -1012,26 +1227,30 @@ class NtrlocSearch extends HTMLElement {
     this.project(id);
   }
 
+  // pane.pageSize itself may be null (user never set one) -- the backend still paginates in that
+  // case (DEFAULT_PAGE_SIZE), so paging must work off the effective size, not the raw field.
+  effectivePageSize(pane) {
+    return pane.pageSize ?? DEFAULT_PAGE_SIZE;
+  }
+
   nextPage(id) {
     const pane = this.pane(id);
-    if (!pane.pageSize) return;
+    const size = this.effectivePageSize(pane);
     // Don't advance past the last page (the backend errors on an offset >= the row count).
-    if (pane.lastTotalCount != null && pane.pageOffset + pane.pageSize >= pane.lastTotalCount) return;
-    pane.pageOffset += pane.pageSize;
+    if (pane.lastTotalCount != null && pane.pageOffset + size >= pane.lastTotalCount) return;
+    pane.pageOffset += size;
     this.project(id);
   }
 
   prevPage(id) {
     const pane = this.pane(id);
-    if (!pane.pageSize) return;
-    pane.pageOffset = Math.max(0, pane.pageOffset - pane.pageSize);
+    pane.pageOffset = Math.max(0, pane.pageOffset - this.effectivePageSize(pane));
     this.project(id);
   }
 
   async project(id, _retriedAfterClamp = false) {
     const pane = this.pane(id);
     if (!pane.selectedTypeName) return;
-    if (!pane.pageSize) pane.pageOffset = 0; // offset without a limit is meaningless
     pane.isLoading = true;
     pane.lastProjectionMs = null;
     this.render();
@@ -1045,6 +1264,11 @@ class NtrlocSearch extends HTMLElement {
           itemTypeName: pane.selectedTypeName,
           sortField: pane.selectedSortField,
           sortDirection: pane.selectedSortField ? pane.selectedSortDirection : undefined,
+          filter: this.buildFilterPredicate(pane),
+          // Both default to false server-side (see ProjectionSpec) -- this admin UI always needs
+          // both, since it renders Edit/Delete affordances and the state-machine section.
+          includePermissions: true,
+          includeStates: true,
           limit: pane.pageSize ?? undefined,
           offset: pane.pageOffset || undefined,
         }),
@@ -1057,9 +1281,10 @@ class NtrlocSearch extends HTMLElement {
 
       // Landed past the end (rows deleted since, or a stale offset) -- snap to the last real page
       // and fetch it once, so the user never sees an empty page they have to Prev out of.
-      if (!_retriedAfterClamp && pane.pageSize && pane.pageOffset > 0
+      if (!_retriedAfterClamp && pane.pageOffset > 0
           && pane.results.length === 0 && pane.lastTotalCount > 0) {
-        pane.pageOffset = Math.max(0, Math.floor((pane.lastTotalCount - 1) / pane.pageSize) * pane.pageSize);
+        const size = this.effectivePageSize(pane);
+        pane.pageOffset = Math.max(0, Math.floor((pane.lastTotalCount - 1) / size) * size);
         pane.isLoading = false;
         return this.project(id, true);
       }
@@ -1246,6 +1471,9 @@ class NtrlocSearch extends HTMLElement {
   renderStateSection(item) {
     const machines = item.states ? Object.entries(item.states) : [];
     if (machines.length === 0) return '';
+    // Only two shapes ever reach here now: active (currentState set), or inactive-but-startable
+    // (see buildProjectedItemStates) -- a machine that's neither has no entry at all, not a third
+    // "not started, and you can't start it either" row with nothing actionable in it.
     const rows = machines.map(([name, s]) => {
       if (s.currentState) {
         // The button is always the transition's own name. An END-bound transition additionally gets
@@ -1260,15 +1488,9 @@ class NtrlocSearch extends HTMLElement {
           ${buttons}
         </div>`;
       }
-      if (s.startable) {
-        return `<div class="sm-row">
-          <span class="sm-machine">${escapeHtml(name)}</span>
-          <button class="sm-start-btn" data-action="sm-start" data-machine="${escapeHtml(name)}">Start</button>
-        </div>`;
-      }
       return `<div class="sm-row">
         <span class="sm-machine">${escapeHtml(name)}</span>
-        <span class="sm-inactive">not started</span>
+        <button class="sm-start-btn" data-action="sm-start" data-machine="${escapeHtml(name)}">Start</button>
       </div>`;
     }).join('');
     return `<div class="sm-section">${rows}</div>`;
@@ -1639,37 +1861,52 @@ class NtrlocSearch extends HTMLElement {
                 <div class="sort-row">
                   ${pane.sortableFields.length > 0 ? `
                     <span class="sort-label">Sort</span>
-                    <md-outlined-select class="query-select" data-action="select-sort-field">
-                      <md-select-option value="" ${!pane.selectedSortField ? 'selected' : ''}>
-                        <div slot="headline">-- None --</div>
-                      </md-select-option>
-                      ${pane.sortableFields.map(field => `
-                        <md-select-option value="${escapeHtml(field.name)}" ${pane.selectedSortField === field.name ? 'selected' : ''}>
-                          <div slot="headline">${escapeHtml(field.name)}${field.system ? ' *' : ''}</div>
-                        </md-select-option>
-                      `).join('')}
-                    </md-outlined-select>
+                    ${this.renderFieldPicker({
+                      key: `sort:${pane.id}`,
+                      fields: pane.sortableFields,
+                      value: pane.selectedSortField,
+                      noneLabel: '-- None --',
+                    })}
                     ${pane.selectedSortField ? `
                       <md-outlined-button class="sort-direction-button" data-action="toggle-sort-direction">${pane.selectedSortDirection}</md-outlined-button>
                     ` : ''}
                   ` : ''}
                   <span class="sort-label page-size-label">Page size</span>
                   <input type="number" class="page-size-input" data-action="set-page-size"
-                         min="1" step="1" inputmode="numeric" placeholder="all"
+                         min="1" step="1" inputmode="numeric" placeholder="${DEFAULT_PAGE_SIZE}"
                          value="${pane.pageSize ?? ''}" />
+                </div>
+                <div class="filter-section">
+                  <span class="sort-label">Filters</span>
+                  ${pane.filters.map((f, i) => `
+                    <div class="filter-row">
+                      ${this.renderFieldPicker({
+                        key: `filter:${pane.id}:${i}`,
+                        fields: pane.sortableFields.filter(field => !field.system),
+                        value: f.field,
+                        noneLabel: '-- Field --',
+                        filterIndex: i,
+                      })}
+                      <span class="filter-op">=</span>
+                      <input type="text" class="filter-value-input" data-action="set-filter-value" data-index="${i}"
+                             placeholder="value" value="${escapeHtml(f.value ?? '')}" />
+                      <button class="control-btn filter-remove-button" data-action="remove-filter" data-index="${i}" title="Remove filter">&#10005;</button>
+                    </div>
+                  `).join('')}
+                  <md-outlined-button class="add-filter-button" data-action="add-filter">+ Add Filter</md-outlined-button>
                 </div>
               ` : ''}
             </div>
             ${pane.results.length > 0 ? `
               <div class="results-summary" style="display: flex; align-items: center; gap: 12px;">
-                <span>${pane.pageSize != null && pane.lastTotalCount != null
+                <span>${pane.lastTotalCount != null
                   ? `${pane.pageOffset + 1}–${pane.pageOffset + pane.results.length} of ${pane.lastTotalCount}`
-                  : `${pane.results.length}${pane.lastTotalCount != null && pane.lastTotalCount !== pane.results.length ? ` of ${pane.lastTotalCount}` : ''}`} items
+                  : `${pane.results.length}`} items
                 ${pane.lastProjectionMs !== null ? `<span class="timing"> &middot; ${(pane.lastProjectionMs / 1000).toFixed(3)}s</span>` : ''}</span>
-                ${pane.pageSize != null && pane.lastTotalCount != null && pane.lastTotalCount > pane.pageSize ? `
+                ${pane.lastTotalCount != null && pane.lastTotalCount > this.effectivePageSize(pane) ? `
                   <div class="pager">
                     <button data-action="page-prev" ${pane.pageOffset === 0 ? 'disabled' : ''}>&lsaquo; Prev</button>
-                    <button data-action="page-next" ${pane.pageOffset + pane.pageSize >= pane.lastTotalCount ? 'disabled' : ''}>Next &rsaquo;</button>
+                    <button data-action="page-next" ${pane.pageOffset + this.effectivePageSize(pane) >= pane.lastTotalCount ? 'disabled' : ''}>Next &rsaquo;</button>
                   </div>
                 ` : ''}
                 <div class="view-toggle">
@@ -1693,12 +1930,145 @@ class NtrlocSearch extends HTMLElement {
     `;
   }
 
+  // Groups a flat sortableFields-shaped list (dotted paths, e.g. "additionalDetails.reviewInfo.
+  // reviewerName") into a nested tree by path segment, alphabetized at every level. Purely a
+  // display concern -- the backend's own dot-path resolution (RegisterPartitionManager.
+  // resolveProperty) is untouched; a leaf's `path` here is still the exact dotted string sort/
+  // filter already send it. System fields (itemId, createdAt, ...) are plain un-dotted names, so
+  // they fall out as ordinary top-level leaves, alphabetized alongside real properties rather than
+  // kept in their own separate group.
+  buildFieldTree(fields) {
+    const root = [];
+    for (const field of fields) {
+      const segments = field.name.split('.');
+      let level = root;
+      for (let i = 0; i < segments.length - 1; i++) {
+        let group = level.find(n => n.children && n.label === segments[i]);
+        if (!group) {
+          group = { label: segments[i], path: null, system: false, children: [] };
+          level.push(group);
+        }
+        level = group.children;
+      }
+      level.push({ label: segments[segments.length - 1], path: field.name, system: field.system, children: null });
+    }
+    return this._sortFieldTree(root);
+  }
+
+  _sortFieldTree(nodes) {
+    return [...nodes]
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map(n => n.children ? { ...n, children: this._sortFieldTree(n.children) } : n);
+  }
+
+  // A leaf survives a query if its own name matches, or any ancestor's does (ancestorMatch is
+  // threaded down through the recursion) -- so typing "info" keeps both requestorName and
+  // requestorEmail visible, indented under requestorInfo, even though neither leaf name itself
+  // contains "info". A container survives only if at least one descendant does, pruning empty
+  // branches. query is assumed already lower-cased by the caller.
+  filterFieldTree(nodes, query, ancestorMatch) {
+    const result = [];
+    for (const node of nodes) {
+      const matched = ancestorMatch || node.label.toLowerCase().includes(query);
+      if (node.children) {
+        const children = this.filterFieldTree(node.children, query, matched);
+        if (children.length > 0) result.push({ ...node, children });
+      } else if (matched) {
+        result.push(node);
+      }
+    }
+    return result;
+  }
+
+  renderFieldTreeNodes(nodes, depth) {
+    return nodes.map(node => {
+      const indent = 12 + depth * 16;
+      if (node.children) {
+        return `<div class="field-tree-group" style="padding-left:${indent}px">${escapeHtml(node.label)}</div>`
+            + this.renderFieldTreeNodes(node.children, depth + 1);
+      }
+      return `<button type="button" class="field-tree-leaf" style="padding-left:${indent}px" data-field-value="${escapeHtml(node.path)}">${escapeHtml(node.label)}${node.system ? ' *' : ''}</button>`;
+    }).join('');
+  }
+
+  renderFieldPickerList(fields, query) {
+    const tree = this.buildFieldTree(fields);
+    const nodes = query ? this.filterFieldTree(tree, query.toLowerCase(), false) : tree;
+    const html = this.renderFieldTreeNodes(nodes, 0);
+    return html || '<div class="field-tree-empty">No matches</div>';
+  }
+
+  // Hand-rolled dropdown, not md-outlined-select: a native/Material select can't render
+  // non-selectable indented group headers (OBJECT properties, never a valid sort/filter target
+  // themselves) alongside their scalar leaves at arbitrary nesting depth, plus an inline search
+  // box that live-filters the list while preserving that nesting -- see filterFieldTree. Popup
+  // visibility is driven by the single component-level openFieldPicker key (see the constructor),
+  // not per-pane state, mirroring how only one native <select> dropdown is ever open at a time.
+  renderFieldPicker({ key, fields, value, noneLabel, filterIndex }) {
+    const isOpen = this.openFieldPicker === key;
+    const dataAttrs = `data-picker-key="${escapeHtml(key)}"`
+        + (filterIndex !== undefined ? ` data-filter-index="${filterIndex}"` : '');
+    return `
+      <div class="field-picker">
+        <button type="button" class="field-picker-toggle" data-action="toggle-field-picker" ${dataAttrs}>${escapeHtml(value ?? noneLabel)}</button>
+        ${isOpen ? `
+          <div class="field-picker-popup" ${dataAttrs}>
+            <input type="text" class="field-picker-search" placeholder="Filter properties..." autocomplete="off" />
+            <button type="button" class="field-tree-none" data-field-value="">${escapeHtml(noneLabel)}</button>
+            <div class="field-tree-list">${this.renderFieldPickerList(fields, '')}</div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  toggleFieldPicker(key) {
+    this.openFieldPicker = this.openFieldPicker === key ? null : key;
+    this.render();
+  }
+
+  // Wires one already-rendered (open) popup: the search input live-filters .field-tree-list via a
+  // direct, scoped innerHTML replacement rather than this.render() -- a full pane re-render on
+  // every keystroke would tear down and recreate the input itself, losing focus/cursor position
+  // mid-type (same reasoning as setPageSize/setFilterValue elsewhere in this file). Leaf clicks
+  // (including the pinned "none" row) go through onSelect and always close the popup.
+  wireFieldPickerPopup(popup, fields, onSelect) {
+    const select = value => {
+      this.openFieldPicker = null;
+      onSelect(value || null);
+    };
+    // The "none" row lives outside .field-tree-list and is never replaced by the live-filter
+    // re-render below, so it's wired exactly once here -- re-wiring it inside wireLeaves (like the
+    // leaves themselves, which genuinely are fresh nodes each time) would stack a duplicate
+    // listener per keystroke.
+    popup.querySelector('.field-tree-none').addEventListener('click', () => select(''));
+    const list = popup.querySelector('.field-tree-list');
+    const wireLeaves = () => {
+      list.querySelectorAll('.field-tree-leaf').forEach(btn => {
+        btn.addEventListener('click', () => select(btn.dataset.fieldValue));
+      });
+    };
+    wireLeaves();
+    const search = popup.querySelector('.field-picker-search');
+    search.addEventListener('input', e => {
+      list.innerHTML = this.renderFieldPickerList(fields, e.target.value);
+      wireLeaves();
+    });
+    search.focus();
+  }
+
   renderItemCard(pane, item) {
     const edit = pane.editingItems[item.itemId];
     const isEditing = !!edit;
     const title = item.displayLabel || item.itemType;
     const shortId = item.itemId.substring(0, 8) + '...';
-    const canEditProps = item.permissions?.edit?.length > 0;
+    // permissions.edit is a tree (see ProjectedItemPermissions), not a flat list -- buildEditTree/
+    // buildFullEditTree never return an empty-but-non-null node (superuser included -- it gets the
+    // real fully-enumerated tree, no separate flag), so a plain non-null check is enough to know
+    // "something somewhere on this item is writable." Per-field filtering of which rows actually
+    // render as editable is still TODO -- entering edit mode currently still offers every top-level
+    // property, not just the ones this tree says are writable.
+    const canEditProps = !!item.permissions?.edit;
     const canDelete = !!item.permissions?.delete;
 
     const propEntries = this.sortPropEntries(Object.entries(item.properties));
@@ -2085,13 +2455,30 @@ class NtrlocSearch extends HTMLElement {
         if (action === 'page-next') el.addEventListener('click', () => this.nextPage(id));
         if (action === 'toggle-sort-direction') el.addEventListener('click', () => this.toggleSortDirection(id));
         if (action === 'select-type') el.addEventListener('change', e => this.selectType(id, e.target.value));
-        if (action === 'select-sort-field') el.addEventListener('change', e => this.selectSortField(id, e.target.value));
+        if (action === 'toggle-field-picker') el.addEventListener('click', () => this.toggleFieldPicker(el.dataset.pickerKey));
         if (action === 'set-page-size') el.addEventListener('change', e => {
           this.setPageSize(id, e.target.value);
           e.target.value = this.pane(id).pageSize ?? ''; // reflect the normalized value without a re-render
         });
+        if (action === 'add-filter') el.addEventListener('click', () => this.addFilter(id));
+        if (action === 'remove-filter') el.addEventListener('click', () => this.removeFilter(id, parseInt(el.dataset.index, 10)));
+        if (action === 'set-filter-value') el.addEventListener('change', e => this.setFilterValue(id, parseInt(el.dataset.index, 10), e.target.value));
         if (action === 'view-formatted') el.addEventListener('click', () => this.setViewMode(id, 'formatted'));
         if (action === 'view-raw') el.addEventListener('click', () => this.setViewMode(id, 'raw'));
+      });
+
+      // At most one field-picker popup renders at a time (this.openFieldPicker), so this is
+      // never more than a single element -- but scoped to this pane regardless, same as every
+      // other [data-action] handler above.
+      const pane = this.pane(id);
+      paneEl.querySelectorAll('.field-picker-popup').forEach(popup => {
+        const filterIndex = popup.dataset.filterIndex;
+        if (filterIndex !== undefined) {
+          const i = parseInt(filterIndex, 10);
+          this.wireFieldPickerPopup(popup, pane.sortableFields.filter(field => !field.system), value => this.setFilterField(id, i, value));
+        } else {
+          this.wireFieldPickerPopup(popup, pane.sortableFields, value => this.selectSortField(id, value));
+        }
       });
 
       paneEl.querySelectorAll('.item-card[data-item-id]').forEach(cardEl => {
