@@ -66,9 +66,6 @@ const ROUTES = [
   { path: '/processes', label: 'Processes' },
   { path: '/tasks', label: 'Tasks' },
   { path: '/access', label: 'Access' },
-  // Temporary -- points at the old group-centric Access screen while the new perspective-based
-  // one is rebuilt piece by piece. Remove this entry once ntrloc-access-old/ is deleted.
-  { path: '/access-old', label: 'Access (old)' },
 ];
 
 class NtrlocNav extends HTMLElement {

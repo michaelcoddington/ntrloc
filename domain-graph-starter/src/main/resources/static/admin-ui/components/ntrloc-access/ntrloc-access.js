@@ -1,11 +1,6 @@
-// New perspective-based Access screen (User / Group / Item Type), replacing the group-centric
-// ntrloc-access-old/ one tab at a time -- see the design work in the "Access Hierarchy Concept"
-// wireframe this ports from. So far: the User perspective's directory + Details tab, and the
-// Group perspective's directory (hierarchy tree + "people reached" panel) + Membership tab are
-// wired to real data. Item Type is still a placeholder, as are the User perspective's Groups/
-// Permissions tabs and the Group perspective's own Permissions tab. Delete ntrloc-access-old/
-// (its script tag and data-route mount in index.html, and its nav.js ROUTES entry) once every
-// piece here has a real replacement.
+// Perspective-based Access screen (User / Group / Item Type) -- see the design work in the
+// "Access Hierarchy Concept" wireframe this ports from. Superseded the old group-centric
+// ntrloc-access-old/ screen, since removed.
 //
 // Group nesting note: the schema (security_group_member_group) technically allows a group to have
 // more than one parent, but this UI only ever offers a single parent picker (see the backend's own

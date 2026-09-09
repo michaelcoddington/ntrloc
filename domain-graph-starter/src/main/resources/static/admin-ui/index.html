@@ -79,12 +79,6 @@
   <script src="components/ntrloc-users/ntrloc-users.js"></script>
   <script src="components/ntrloc-groups/ntrloc-groups.js"></script>
   <script src="components/ntrloc-access/ntrloc-access.js"></script>
-  <!-- Old group-centric Access screen, kept mounted at /access-old only while the new
-       perspective-based screen (User/Group/Item Type) below is built out piece by piece -- see
-       ntrloc-access/ntrloc-access.js's own header comment. Remove this script tag, its
-       data-route mount below, its nav.js ROUTES entry, and the whole ntrloc-access-old/
-       directory once the replacement is feature-complete. -->
-  <script src="components/ntrloc-access-old/ntrloc-access-old.js"></script>
   <script type="module" src="components/ntrloc-process-editor/ntrloc-process-editor.js"></script>
   <script type="module" src="components/ntrloc-decision-table-editor/ntrloc-decision-table-editor.js"></script>
   <style>
@@ -210,9 +204,6 @@
       display: flex;
       flex-direction: column;
     }
-    ntrloc-access-old[data-route].current {
-      flex-direction: row;
-    }
   </style>
 </head>
 <body>
@@ -225,7 +216,6 @@
     <ntrloc-users data-route="/users"></ntrloc-users>
     <ntrloc-groups data-route="/groups"></ntrloc-groups>
     <ntrloc-access data-route="/access"></ntrloc-access>
-    <ntrloc-access-old data-route="/access-old"></ntrloc-access-old>
   </div>
 
   <script>
