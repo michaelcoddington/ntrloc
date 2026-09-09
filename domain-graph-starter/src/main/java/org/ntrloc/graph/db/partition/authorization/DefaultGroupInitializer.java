@@ -67,6 +67,17 @@ public class DefaultGroupInitializer {
         return securityRepo.findGroupByName(DEFAULT_GROUP_NAME).orElseThrow().id();
     }
 
+    // Every user-creation path (UserAdminController, LocalAccountSeeder,
+    // AuthorizationTestDataInitializer) must call this so nobody ends up uncovered until the next
+    // restart's populateAfterStartup backfill catches them -- addUserToGroup is itself idempotent
+    // (ON CONFLICT DO NOTHING) so calling this twice for the same user is harmless. A caller that
+    // constructor-injects DefaultGroupInitializer is guaranteed ensureGroupExists() has already run
+    // (Spring fully initializes a bean, @PostConstruct included, before handing it to a dependent
+    // bean's constructor), so getDefaultGroupId() below never races the group's own creation.
+    public void addUserToDefaultGroup(UUID userId) {
+        securityRepo.addUserToGroup(userId, getDefaultGroupId());
+    }
+
     private void addAllExistingUsersToGroup(UUID groupId) {
         jdbcClient.sql("""
                 INSERT INTO security_group_member (user_id, group_id)

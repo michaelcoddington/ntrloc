@@ -253,8 +253,9 @@ public class SecurityRepository {
                 .update();
     }
 
-    public void updateUser(UUID userId, String displayName, String email, boolean isSuperuser) {
-        jdbcClient.sql("UPDATE security_user SET display_name = :displayName, email = :email, is_superuser = :isSuperuser WHERE id = :userId")
+    public void updateUser(UUID userId, String externalId, String displayName, String email, boolean isSuperuser) {
+        jdbcClient.sql("UPDATE security_user SET external_id = :externalId, display_name = :displayName, email = :email, is_superuser = :isSuperuser WHERE id = :userId")
+                .param("externalId", externalId)
                 .param("displayName", displayName)
                 .param(COL_EMAIL, email)
                 .param("isSuperuser", isSuperuser)
@@ -265,6 +266,27 @@ public class SecurityRepository {
     public void updateLocalCredentialsRole(UUID userId, String role) {
         jdbcClient.sql("UPDATE security_local_credentials SET role = :role WHERE user_id = :userId")
                 .param("role", role)
+                .param(PARAM_USER_ID, userId)
+                .update();
+    }
+
+    // security_local_credentials.email is confusingly named -- it's actually the login lookup key
+    // (see LocalUserDetailsService/findCredentialsByEmail), populated from external_id at creation,
+    // not a real email address. It has to be kept in sync with security_user.external_id whenever
+    // that's edited, or the user would be silently locked out under their new username.
+    public void updateLocalCredentialsLogin(UUID userId, String externalId) {
+        jdbcClient.sql("UPDATE security_local_credentials SET email = :externalId WHERE user_id = :userId")
+                .param("externalId", externalId)
+                .param(PARAM_USER_ID, userId)
+                .update();
+    }
+
+    // Cascades to security_group_member, security_local_credentials, security_personal_access_token,
+    // and process_group_member (all ON DELETE CASCADE) -- nothing else references security_user via
+    // a real FK, since authorization grant tables key principals by a plain UUID (GROUP or USER)
+    // rather than an FK to either table.
+    public void deleteUser(UUID userId) {
+        jdbcClient.sql("DELETE FROM security_user WHERE id = :userId")
                 .param(PARAM_USER_ID, userId)
                 .update();
     }

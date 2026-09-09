@@ -25,13 +25,18 @@ public class GroupAdminController {
 
     private static final String GROUP_NOT_FOUND = "Group not found";
 
-    public record GroupView(UUID id, String name, int memberCount) {}
+    // parentIds is every group this one is directly nested under -- the schema (security_group_
+    // member_group) technically allows more than one, but the admin UI only ever offers a single
+    // parent picker, so in practice this list has 0 or 1 entries for anything created there.
+    public record GroupView(UUID id, String name, int memberCount, List<UUID> parentIds) {}
 
-    public record CreateGroupRequest(String name) {}
+    public record CreateGroupRequest(String name, UUID parentGroupId) {}
 
     public record UpdateGroupRequest(String name) {}
 
-    public record MemberView(UUID id, String externalId, String displayName, String email) {}
+    public record UpdateParentRequest(UUID parentGroupId) {}
+
+    public record MemberView(UUID id, String externalId, String displayName, String email, boolean isSuperuser) {}
 
     public record AddMemberRequest(UUID userId) {}
 
@@ -50,21 +55,32 @@ public class GroupAdminController {
     List<GroupView> listGroups(ServerHttpRequest request, Authentication authentication) {
         requireAdmin(request, authentication);
         return repo.listGroups().stream()
-                .map(g -> new GroupView(g.id(), g.name(), repo.listGroupMembers(g.id()).size()))
+                .map(this::toView)
                 .toList();
     }
 
+    // "everyone" is the one and only top-level group -- it's seeded directly by
+    // DefaultGroupInitializer at boot, never through this endpoint, so every group created here
+    // must nest under something (ultimately "everyone" itself, directly or transitively). Without
+    // this check the admin UI's old parent picker ("(Top level)" alongside "everyone") could create
+    // a second, sibling root that the tree had no sensible way to relate to "everyone".
     @PostMapping
     GroupView createGroup(@RequestBody CreateGroupRequest body, ServerHttpRequest request, Authentication authentication) {
         requireAdmin(request, authentication);
         if (body.name() == null || body.name().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Group name is required");
         }
+        if (body.parentGroupId() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A parent group is required -- 'everyone' is the only top-level group");
+        }
         if (repo.findGroupByName(body.name().trim()).isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Group already exists: " + body.name());
         }
+        repo.findGroupById(body.parentGroupId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Parent group not found"));
         var group = repo.createGroup(body.name().trim());
-        return new GroupView(group.id(), group.name(), 0);
+        repo.addGroupToGroup(group.id(), body.parentGroupId());
+        return toView(group);
     }
 
     @PutMapping("/{groupId}")
@@ -77,7 +93,42 @@ public class GroupAdminController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Group name is required");
         }
         var updated = repo.updateGroup(groupId, body.name().trim());
-        return new GroupView(updated.id(), updated.name(), repo.listGroupMembers(groupId).size());
+        return toView(updated);
+    }
+
+    // Sets this group's single parent, replacing whatever it was nested under before. A null
+    // parentGroupId is rejected -- "everyone" is the only group allowed to have no parent (see
+    // createGroup's own comment), and it's seeded directly by DefaultGroupInitializer rather than
+    // ever passing through this endpoint, so there's no legitimate caller that needs to clear a
+    // group's parent entirely. The admin UI's tree only ever shows/edits one parent per group (see
+    // GroupView's own comment), so "reparent" here means "clear every existing containing-group
+    // edge, then add the new one" rather than a general multi-parent add/remove; that's still
+    // exactly what the DAG-shaped schema underneath allows, just used in a restricted way.
+    @PutMapping("/{groupId}/parent")
+    GroupView updateParent(@PathVariable("groupId") UUID groupId, @RequestBody UpdateParentRequest body,
+                           ServerHttpRequest request, Authentication authentication) {
+        requireAdmin(request, authentication);
+        var group = repo.findGroupById(groupId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, GROUP_NOT_FOUND));
+        if (body.parentGroupId() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A parent group is required -- 'everyone' is the only top-level group");
+        }
+        repo.findGroupById(body.parentGroupId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Parent group not found"));
+        for (var existingParent : repo.listContainingGroups(groupId)) {
+            repo.removeGroupFromGroup(groupId, existingParent.id());
+        }
+        try {
+            repo.addGroupToGroup(groupId, body.parentGroupId());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+        return toView(group);
+    }
+
+    private GroupView toView(SecurityRepository.GroupRow g) {
+        var parentIds = repo.listContainingGroups(g.id()).stream().map(SecurityRepository.GroupRow::id).toList();
+        return new GroupView(g.id(), g.name(), repo.listGroupMembers(g.id()).size(), parentIds);
     }
 
     @DeleteMapping("/{groupId}")
@@ -100,7 +151,7 @@ public class GroupAdminController {
         repo.findGroupById(groupId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, GROUP_NOT_FOUND));
         return repo.listGroupMembers(groupId).stream()
-                .map(u -> new MemberView(u.id(), u.externalId(), u.displayName(), u.email()))
+                .map(u -> new MemberView(u.id(), u.externalId(), u.displayName(), u.email(), u.isSuperuser()))
                 .toList();
     }
 

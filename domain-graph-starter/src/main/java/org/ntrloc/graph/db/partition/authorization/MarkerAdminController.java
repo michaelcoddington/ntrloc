@@ -2,6 +2,7 @@ package org.ntrloc.graph.db.partition.authorization;
 
 import org.ntrloc.graph.db.partition.authorization.repository.AuthorizationRepository;
 import org.ntrloc.graph.db.partition.security.PrincipalResolver;
+import org.ntrloc.graph.db.partition.security.repository.SecurityRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.security.core.Authentication;
@@ -16,9 +17,11 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 // Marker CRUD -- deliberately its own controller, separate from AccessAdminController (which
 // covers type-level grants only), since the marker/grant admin surface is expected to keep growing
@@ -39,11 +42,18 @@ public class MarkerAdminController {
 
     public record UpdateMarkerRequest(String name, String description) {}
 
+    public record PrincipalRef(UUID id, String name) {}
+
+    public record MarkerGrantPrincipalsView(List<PrincipalRef> groups, List<PrincipalRef> users) {}
+
     private final AuthorizationRepository authRepo;
+    private final SecurityRepository securityRepo;
     private final PrincipalResolver principalResolver;
 
-    public MarkerAdminController(AuthorizationRepository authRepo, PrincipalResolver principalResolver) {
+    public MarkerAdminController(AuthorizationRepository authRepo, SecurityRepository securityRepo,
+                                  PrincipalResolver principalResolver) {
         this.authRepo = authRepo;
+        this.securityRepo = securityRepo;
         this.principalResolver = principalResolver;
     }
 
@@ -86,6 +96,33 @@ public class MarkerAdminController {
     void deleteMarker(@PathVariable UUID id, ServerHttpRequest request, Authentication authentication) {
         requireAdmin(request, authentication);
         authRepo.deleteMarker(id);
+    }
+
+    // Which groups and users have their own marker_grant row for this marker -- a row exists the
+    // moment any of the six grant categories is first set on a principal (see ensureMarkerGrant),
+    // regardless of what's actually granted under it, so this is exactly "who to show in the Item
+    // Type perspective's Group grants / User grants trees" (a connector-only group pulled in for
+    // hierarchy has no row here; it still renders, just with nothing of its own to show).
+    @GetMapping("/{markerId}/grants")
+    MarkerGrantPrincipalsView getMarkerGrantPrincipals(@PathVariable UUID markerId,
+                                                        ServerHttpRequest request, Authentication authentication) {
+        requireAdmin(request, authentication);
+        var groupNames = securityRepo.listGroups().stream()
+                .collect(Collectors.toMap(g -> g.id(), g -> g.name()));
+        var userNames = securityRepo.listUsers().stream()
+                .collect(Collectors.toMap(u -> u.id(), u -> u.displayName()));
+
+        List<PrincipalRef> groups = new ArrayList<>();
+        List<PrincipalRef> users = new ArrayList<>();
+        for (var grant : authRepo.getAllMarkerGrants()) {
+            if (!grant.markerId().equals(markerId)) continue;
+            if ("GROUP".equals(grant.principalType()) && groupNames.containsKey(grant.principalId())) {
+                groups.add(new PrincipalRef(grant.principalId(), groupNames.get(grant.principalId())));
+            } else if ("USER".equals(grant.principalType()) && userNames.containsKey(grant.principalId())) {
+                users.add(new PrincipalRef(grant.principalId(), userNames.get(grant.principalId())));
+            }
+        }
+        return new MarkerGrantPrincipalsView(groups, users);
     }
 
     private void requireAdmin(ServerHttpRequest request, Authentication authentication) {

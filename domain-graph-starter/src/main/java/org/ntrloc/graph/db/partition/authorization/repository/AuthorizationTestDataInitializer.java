@@ -28,13 +28,16 @@ public class AuthorizationTestDataInitializer implements ApplicationRunner {
     private final SecurityRepository securityRepo;
     private final AuthorizationRepository authorizationRepo;
     private final JdbcClient jdbcClient;
+    private final DefaultGroupInitializer defaultGroupInitializer;
 
     public AuthorizationTestDataInitializer(SchemaManager schemaManager, SecurityRepository securityRepo,
-                                             AuthorizationRepository authorizationRepo, JdbcClient jdbcClient) {
+                                             AuthorizationRepository authorizationRepo, JdbcClient jdbcClient,
+                                             DefaultGroupInitializer defaultGroupInitializer) {
         this.schemaManager = schemaManager;
         this.securityRepo = securityRepo;
         this.authorizationRepo = authorizationRepo;
         this.jdbcClient = jdbcClient;
+        this.defaultGroupInitializer = defaultGroupInitializer;
     }
 
     // Not @PostConstruct: applyMutations() below publishes SchemaChangeEvent, and
@@ -72,7 +75,11 @@ public class AuthorizationTestDataInitializer implements ApplicationRunner {
         var alice = securityRepo.createUser("alice", "Alice (viewer group member)", null, false);
         var bob = securityRepo.createUser("bob", "Bob (viewer group member)", null, false);
         var carol = securityRepo.createUser("carol", "Carol (direct grant, no group)", null, false);
-        securityRepo.createUser("root", "Root (superuser)", null, true);
+        var root = securityRepo.createUser("root", "Root (superuser)", null, true);
+        defaultGroupInitializer.addUserToDefaultGroup(alice.id());
+        defaultGroupInitializer.addUserToDefaultGroup(bob.id());
+        defaultGroupInitializer.addUserToDefaultGroup(carol.id());
+        defaultGroupInitializer.addUserToDefaultGroup(root.id());
 
         var viewers = securityRepo.createGroup("viewers");
         securityRepo.addUserToGroup(alice.id(), viewers.id());

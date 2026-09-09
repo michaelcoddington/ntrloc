@@ -33,7 +33,7 @@ class SecurityRepositoryIntegrationTest extends AbstractIntegrationTest {
     void updateUser_persistsChanges() {
         var user = securityRepo.createUser("user-" + UUID.randomUUID(), "Original Name", "original@example.com", false);
 
-        securityRepo.updateUser(user.id(), "Updated Name", "updated@example.com", true);
+        securityRepo.updateUser(user.id(), user.externalId(), "Updated Name", "updated@example.com", true);
 
         var reloaded = securityRepo.findUserByExternalId(user.externalId()).orElseThrow();
         assertThat(reloaded.displayName()).isEqualTo("Updated Name");
