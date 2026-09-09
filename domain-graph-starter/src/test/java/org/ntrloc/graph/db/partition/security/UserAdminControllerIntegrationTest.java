@@ -113,7 +113,7 @@ class UserAdminControllerIntegrationTest extends AbstractIntegrationTest {
         webTestClient.put().uri("/api/admin/users/" + user.id())
                 .header("X-Ntrloc-User", "root")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("displayName", "Updated Name", "email", "updated@example.com", "role", "admin"))
+                .bodyValue(Map.of("externalId", user.externalId(), "displayName", "Updated Name", "email", "updated@example.com", "role", "admin"))
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()

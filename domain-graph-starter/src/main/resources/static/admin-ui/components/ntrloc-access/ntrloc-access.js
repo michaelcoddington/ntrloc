@@ -608,14 +608,20 @@ injectStyles('ntrloc-access-styles', `
 
   .axs-gt-wrap { margin-bottom: 16px; }
   .axs-gt-wrap:last-child { margin-bottom: 0; }
-  .axs-gt-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 6px; }
+  /* Clickable header for each of the three collapsible grant-detail sections (Properties/Links/
+     State machines) -- see renderCollapsibleGrantSection. */
+  .axs-gt-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   .axs-gt-subblock { margin: 10px 0 0 24px; padding-top: 10px; border-top: 1px dashed var(--border); }
   .axs-gt-subblock-label { display: block; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); margin-bottom: 6px; }
   .axs-gt-grid-scroll { overflow-x: auto; max-width: 100%; }
   .axs-gt-grid { display: grid; gap: 3px 10px; align-items: center; width: 100%; }
   .axs-gt-row { display: contents; }
+  /* Overrides .axs-gt-row's own display:contents above -- see .axs-shadow-warn[hidden]'s own
+     comment for why the [hidden] attribute needs an explicit rule here to actually hide anything. */
+  .axs-gt-row[hidden] { display: none; }
   .axs-gt-header { font-size: 14px; color: var(--muted); font-weight: 700; letter-spacing: 0.03em; padding-bottom: 5px; border-bottom: 1px solid var(--border); text-align: left; }
   .axs-gt-name-cell { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .axs-gt-name-cell .axs-disclosure { margin-right: 4px; }
   .axs-gt-cell { text-align: left; }
   .axs-gt-dash { color: var(--border); font-size: 14px; }
 
@@ -868,6 +874,16 @@ class NtrlocAccess extends HTMLElement {
     this.typeLevelGrantInherited = null;
     this.typeLevelGrantInheritedNames = null;
     this.typeLevelGrantShadowNames = null;
+
+    // Grant detail pane collapse state -- shared by all three perspectives, since they all render
+    // through the same renderGrantDetailPane/renderPropertyGrantTree. Keyed by a fixed section name
+    // ('properties'/'links'/'stateMachines') for the three top-level sections, and by property id
+    // for individual OBJECT containers (arbitrarily nested) within the Properties tree. Persists
+    // across selection changes and re-renders (toggling is a pure DOM operation, not a re-render --
+    // see syncPropertyRowVisibility/the [data-toggle-grant-section] handler -- so it never disturbs
+    // in-progress edits).
+    this.collapsedGrantSections = new Set();
+    this.collapsedObjectProperties = new Set();
 
     this.modal = null; // { type, ...context } | null
     this.error = '';
@@ -3064,12 +3080,12 @@ class NtrlocAccess extends HTMLElement {
     return `
       <div class="axs-grant-left">
         <div>
-          <div class="axs-grant-block-title">Group grants</div>
-          <div class="axs-grant-list">${groupTreeHtml}</div>
-        </div>
-        <div>
           <div class="axs-grant-block-title">User grants <span class="axs-add-link" data-action="open-add-user-grant">+ Add</span></div>
           <div class="axs-grant-list">${userListHtml}</div>
+        </div>
+        <div>
+          <div class="axs-grant-block-title">Group grants</div>
+          <div class="axs-grant-list">${groupTreeHtml}</div>
         </div>
         ${showUsersBlock ? `
         <div>
@@ -3169,9 +3185,27 @@ class NtrlocAccess extends HTMLElement {
         ${this.renderItemCapRow('Read', own.itemRead, inherited.itemRead, 'item:read', inheritedNames.itemRead, shadowNames.itemRead)}
         ${this.renderItemCapRow('Delete', own.itemDelete, inherited.itemDelete, 'item:delete', inheritedNames.itemDelete, shadowNames.itemDelete)}
       </div>
-      <div class="axs-gt-wrap"><div class="axs-gt-title">Properties</div>${this.renderPropertyGrantTree(t, own.properties, inherited.properties, inheritedNames.properties, shadowNames.properties)}</div>
-      ${this.renderLinksGrantSection(t, own, inherited, inheritedNames, shadowNames)}
-      <div class="axs-gt-wrap"><div class="axs-gt-title">State machines</div>${this.renderStateMachinesGrantSection(t, own, inherited, inheritedNames, shadowNames)}</div>
+      ${this.renderCollapsibleGrantSection('properties', 'Properties', this.renderPropertyGrantTree(t, own.properties, inherited.properties, inheritedNames.properties, shadowNames.properties))}
+      ${this.renderCollapsibleGrantSection('links', 'Links', this.renderLinksGrantSection(t, own, inherited, inheritedNames, shadowNames))}
+      ${this.renderCollapsibleGrantSection('stateMachines', 'State machines', this.renderStateMachinesGrantSection(t, own, inherited, inheritedNames, shadowNames))}
+    `;
+  }
+
+  // Shared collapsible wrapper for the three top-level sections (Properties/Links/State machines)
+  // of the grant detail pane -- used identically by all three perspectives, since they all render
+  // through this same pane. Collapsing hides the body via the [hidden] attribute rather than
+  // skipping its render entirely, and the toggle click handler below flips it in place without a
+  // full re-render, so any in-progress edit inside stays intact across a collapse/expand.
+  renderCollapsibleGrantSection(key, title, bodyHtml) {
+    const collapsed = this.collapsedGrantSections.has(key);
+    return `
+      <div class="axs-gt-wrap">
+        <div class="axs-gt-title" data-toggle-grant-section="${key}">
+          <span class="axs-disclosure axs-disclosure-lg ${collapsed ? '' : 'open'}">&#9656;</span>
+          ${title}
+        </div>
+        <div class="axs-gt-section-body"${collapsed ? ' hidden' : ''}>${bodyHtml}</div>
+      </div>
     `;
   }
 
@@ -3248,16 +3282,11 @@ class NtrlocAccess extends HTMLElement {
     return `<div class="axs-itemcap-row"><span class="axs-itemcap-label">${label}</span>${check}</div>`;
   }
 
-  // bulkInfo ({ leafIds, ownMap }) is only ever passed for an OBJECT-property container row (see
-  // renderPropertyGrantTree's walk) -- every other caller passes hasChildren=false, so it's unused.
-  renderGrantTreeRow(name, depth, hasChildren, ownEntry, inheritedEntry, category, id, fields, inheritedNamesEntry, shadowNamesEntry, bulkInfo) {
+  // Non-hierarchical grant row (link perspectives, link properties, state machine starts) -- no
+  // chevron, no nesting. The Properties tree has its own renderPropertyGrantRow instead, since it
+  // alone needs OBJECT-container chevrons, bulk toggles, and ancestor tracking for collapse.
+  renderGrantTreeRow(name, depth, ownEntry, inheritedEntry, category, id, fields, inheritedNamesEntry, shadowNamesEntry) {
     const cells = fields.map(f => {
-      if (hasChildren) {
-        if (!this.grantEditing || !bulkInfo) return `<div class="axs-gt-cell axs-gt-dash">&mdash;</div>`;
-        const state = this.containerFieldState(bulkInfo.leafIds, f, bulkInfo.ownMap);
-        if (state === null) return `<div class="axs-gt-cell axs-gt-dash">&mdash;</div>`;
-        return `<div class="axs-gt-cell">${this.bulkPermCheckHtml(state, category, id, f, bulkInfo.leafIds)}</div>`;
-      }
       const own = ownEntry ? !!ownEntry[f] : false;
       const inherited = inheritedEntry ? !!inheritedEntry[f] : false;
       const inheritedNames = inheritedNamesEntry ? (inheritedNamesEntry[f] || []) : [];
@@ -3274,6 +3303,55 @@ class NtrlocAccess extends HTMLElement {
   leafPropertyIdsUnder(node) {
     if (node.type !== 'OBJECT') return [node.id];
     return (node.properties || []).flatMap(child => this.leafPropertyIdsUnder(child));
+  }
+
+  // One row of the Properties tree. Unlike the generic renderGrantTreeRow, this one always
+  // reserves a leading chevron slot -- a real expand/collapse toggle for an OBJECT container
+  // (arbitrarily nested), or an invisible same-width spacer for a leaf -- so container and leaf
+  // names stay column-aligned regardless of depth.
+  //
+  // ancestorIds (root-first) is the chain of OBJECT container ids this row is nested under, minus
+  // itself; stamped as data-property-ancestors so a container's own collapse toggle can find and
+  // hide every descendant row in one pass (syncPropertyRowVisibility), however deep, without a
+  // real DOM parent/child relationship to lean on -- wrapGrantGrid's rows are flat CSS-grid
+  // siblings (display:contents), not actually nested in the DOM.
+  renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap) {
+    const hasChildren = node.type === 'OBJECT' && node.properties && node.properties.length > 0;
+    const isOpen = hasChildren && !this.collapsedObjectProperties.has(node.id);
+    const disclosure = hasChildren
+      ? `<span class="axs-disclosure ${isOpen ? 'open' : ''}" data-toggle-object-property="${node.id}">&#9656;</span>`
+      : `<span class="axs-disclosure leaf">&#9656;</span>`;
+    const cells = ['read', 'write'].map(f => {
+      if (hasChildren) {
+        if (!this.grantEditing) return `<div class="axs-gt-cell axs-gt-dash">&mdash;</div>`;
+        const leafIds = this.leafPropertyIdsUnder(node);
+        const state = this.containerFieldState(leafIds, f, ownMap);
+        if (state === null) return `<div class="axs-gt-cell axs-gt-dash">&mdash;</div>`;
+        return `<div class="axs-gt-cell">${this.bulkPermCheckHtml(state, 'property', node.id, f, leafIds)}</div>`;
+      }
+      const own = !!(ownMap.get(node.id) || {})[f];
+      const inherited = !!(inheritedMap.get(node.id) || {})[f];
+      const inheritedNamesEntry = inheritedNamesMap.get(node.id);
+      const shadowNamesEntry = shadowNamesMap.get(node.id);
+      const inheritedNames = inheritedNamesEntry ? (inheritedNamesEntry[f] || []) : [];
+      const shadowNames = shadowNamesEntry ? (shadowNamesEntry[f] || []) : [];
+      const check = this.permCheckHtml(own, inherited, this.grantEditing ? `property:${node.id}:${f}` : null, inheritedNames, shadowNames);
+      return `<div class="axs-gt-cell">${check}</div>`;
+    }).join('');
+    const ancestorAttr = ancestorIds.length ? ` data-property-ancestors="${ancestorIds.join(',')}"` : '';
+    const hiddenNow = ancestorIds.some(id => this.collapsedObjectProperties.has(id));
+    return `<div class="axs-gt-row"${ancestorAttr}${hiddenNow ? ' hidden' : ''}><div class="axs-gt-name-cell" style="padding-left:${depth * 16}px">${disclosure}${this.escapeHtml(node.name)}</div>${cells}</div>`;
+  }
+
+  // Recomputes every OBJECT-property row's visibility from collapsedObjectProperties -- called
+  // after any toggle click so a container's descendants (at any depth) hide/show together, without
+  // a full re-render (see renderPropertyGrantRow's own comment on why rows can't just nest in the
+  // DOM to get this for free).
+  syncPropertyRowVisibility() {
+    this.querySelectorAll('.axs-gt-row[data-property-ancestors]').forEach(row => {
+      const ancestorIds = row.dataset.propertyAncestors.split(',').filter(Boolean);
+      row.hidden = ancestorIds.some(id => this.collapsedObjectProperties.has(id));
+    });
   }
 
   // 'all' | 'partial' | 'none' | null (null = no leaf under this container -- renders as a blank
@@ -3326,19 +3404,15 @@ class NtrlocAccess extends HTMLElement {
     const props = schema ? schema.properties : [];
     if (!props.length) return '<div class="axs-empty-hint">Nothing defined on this scope.</div>';
     const rows = [];
-    const walk = (nodes, depth) => {
-      for (const node of nodes) {
+    const walk = (nodes, depth, ancestorIds) => {
+      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name));
+      for (const node of sorted) {
+        rows.push(this.renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap));
         const hasChildren = node.type === 'OBJECT' && node.properties && node.properties.length > 0;
-        const bulkInfo = hasChildren ? { leafIds: this.leafPropertyIdsUnder(node), ownMap } : null;
-        rows.push(this.renderGrantTreeRow(node.name, depth, hasChildren,
-          hasChildren ? null : ownMap.get(node.id), hasChildren ? null : inheritedMap.get(node.id),
-          'property', node.id, ['read', 'write'],
-          hasChildren ? null : inheritedNamesMap.get(node.id), hasChildren ? null : shadowNamesMap.get(node.id),
-          bulkInfo));
-        if (hasChildren) walk(node.properties, depth + 1);
+        if (hasChildren) walk(node.properties, depth + 1, [...ancestorIds, node.id]);
       }
     };
-    walk(props, 0);
+    walk(props, 0, []);
     return this.wrapGrantGrid(rows.join(''), ['Read', 'Write']);
   }
 
@@ -3350,17 +3424,17 @@ class NtrlocAccess extends HTMLElement {
   renderLinksGrantSection(t, own, inherited, inheritedNames, shadowNames) {
     const schema = this.itemTypeSchema(t.id);
     const linksMap = schema ? (schema.links || {}) : {};
-    const perspectiveNames = Object.keys(linksMap);
+    const perspectiveNames = Object.keys(linksMap).sort((a, b) => a.localeCompare(b));
     if (!perspectiveNames.length) {
-      return `<div class="axs-gt-wrap"><div class="axs-gt-title">Links</div><div class="axs-empty-hint">No links defined on this scope.</div></div>`;
+      return '<div class="axs-empty-hint">No links defined on this scope.</div>';
     }
     const blocks = perspectiveNames.map(name => {
       const persp = linksMap[name][0];
-      const row = this.renderGrantTreeRow(name, 0, false, own.linkPerspectives.get(persp.id), inherited.linkPerspectives.get(persp.id), 'linkpersp', persp.id, ['create', 'read', 'delete'], inheritedNames.linkPerspectives.get(persp.id), shadowNames.linkPerspectives.get(persp.id));
+      const row = this.renderGrantTreeRow(name, 0, own.linkPerspectives.get(persp.id), inherited.linkPerspectives.get(persp.id), 'linkpersp', persp.id, ['create', 'read', 'delete'], inheritedNames.linkPerspectives.get(persp.id), shadowNames.linkPerspectives.get(persp.id));
       const linkType = (this.schema.links || []).find(l => l.id === persp.linkId);
-      const linkProps = linkType ? linkType.properties : [];
+      const linkProps = linkType ? [...linkType.properties].sort((a, b) => a.name.localeCompare(b.name)) : [];
       const propGrid = linkProps.length
-        ? this.wrapGrantGrid(linkProps.map(p => this.renderGrantTreeRow(p.name, 0, false, own.linkProperties.get(p.id), inherited.linkProperties.get(p.id), 'linkprop', p.id, ['read', 'write'], inheritedNames.linkProperties.get(p.id), shadowNames.linkProperties.get(p.id))).join(''), ['Read', 'Write'])
+        ? this.wrapGrantGrid(linkProps.map(p => this.renderGrantTreeRow(p.name, 0, own.linkProperties.get(p.id), inherited.linkProperties.get(p.id), 'linkprop', p.id, ['read', 'write'], inheritedNames.linkProperties.get(p.id), shadowNames.linkProperties.get(p.id))).join(''), ['Read', 'Write'])
         : '<div class="axs-empty-hint" style="padding:2px 0;">No properties on this link.</div>';
       return `
         ${this.wrapGrantGrid(row, ['Create', 'Read', 'Delete'])}
@@ -3370,7 +3444,7 @@ class NtrlocAccess extends HTMLElement {
         </div>
       `;
     }).join('<div style="height:14px;"></div>');
-    return `<div class="axs-gt-wrap"><div class="axs-gt-title">Links</div>${blocks}</div>`;
+    return blocks;
   }
 
   renderStateMachinesGrantSection(t, own, inherited, inheritedNames, shadowNames) {
@@ -3683,6 +3757,29 @@ class NtrlocAccess extends HTMLElement {
           const leaf = this.querySelector(`[data-grant-field="${category}:${leafId}:${field}"]`);
           if (leaf && (leaf.dataset.granted === 'true') !== nextValue) leaf.click();
         });
+      });
+    });
+    // OBJECT-property container expand/collapse -- a pure DOM toggle (see syncPropertyRowVisibility)
+    // so it never disturbs an in-progress edit underneath.
+    this.querySelectorAll('[data-toggle-object-property]').forEach(el => {
+      el.addEventListener('click', () => {
+        const id = el.dataset.toggleObjectProperty;
+        if (this.collapsedObjectProperties.has(id)) this.collapsedObjectProperties.delete(id);
+        else this.collapsedObjectProperties.add(id);
+        el.classList.toggle('open', !this.collapsedObjectProperties.has(id));
+        this.syncPropertyRowVisibility();
+      });
+    });
+    // Properties/Links/State machines section collapse -- same pure-DOM-toggle approach, scoped to
+    // this section's own wrap so it doesn't touch the other two.
+    this.querySelectorAll('[data-toggle-grant-section]').forEach(el => {
+      el.addEventListener('click', () => {
+        const key = el.dataset.toggleGrantSection;
+        const collapsed = !this.collapsedGrantSections.has(key);
+        if (collapsed) this.collapsedGrantSections.add(key); else this.collapsedGrantSections.delete(key);
+        el.querySelector('.axs-disclosure').classList.toggle('open', !collapsed);
+        const wrap = el.closest('.axs-gt-wrap');
+        wrap.querySelector('.axs-gt-section-body').hidden = collapsed;
       });
     });
     this.querySelector('[data-action="start-grant-edit"]')?.addEventListener('click', () => this.startGrantEdit());

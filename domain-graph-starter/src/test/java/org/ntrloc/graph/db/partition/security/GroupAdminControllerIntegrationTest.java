@@ -75,7 +75,7 @@ class GroupAdminControllerIntegrationTest extends AbstractIntegrationTest {
         webTestClient.post().uri("/api/admin/groups")
                 .header("X-Ntrloc-User", "root")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("name", name))
+                .bodyValue(Map.of("name", name, "parentGroupId", defaultGroupInitializer.getDefaultGroupId()))
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
@@ -103,7 +103,7 @@ class GroupAdminControllerIntegrationTest extends AbstractIntegrationTest {
         webTestClient.post().uri("/api/admin/groups")
                 .header("X-Ntrloc-User", "root")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("name", name))
+                .bodyValue(Map.of("name", name, "parentGroupId", defaultGroupInitializer.getDefaultGroupId()))
                 .exchange()
                 .expectStatus().isEqualTo(HttpStatus.CONFLICT);
     }

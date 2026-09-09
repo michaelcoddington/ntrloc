@@ -470,6 +470,17 @@ const schemaViewModel = {
       for (const perspectives of Object.values(item.links)) {
         for (const p of perspectives) {
           if (p.isReadonly) continue;
+          // A link has exactly one definition shared by both its perspectives (see
+          // DeleteLinkDefinitionMutation's own repo.deleteLink), so deleting either side deletes
+          // the whole thing -- processedLinkIds (already used below for link-property dedup)
+          // keeps a self-referential link's two same-item perspectives from emitting this twice.
+          if (p.isDeleted) {
+            if (!processedLinkIds.has(p.linkId)) {
+              processedLinkIds.add(p.linkId);
+              ops.push({ type: 'DELETE_LINK', id: p.linkId });
+            }
+            continue;
+          }
           if (p.name !== p.originalName || p.minCardinality !== p.originalMinCardinality || p.maxCardinality !== p.originalMaxCardinality) {
             ops.push({ type: 'UPDATE_PERSPECTIVE', id: p.id, name: p.name, description: p.description, minCardinality: p.minCardinality, maxCardinality: p.maxCardinality });
           }
@@ -607,6 +618,7 @@ const schemaViewModel = {
   describePendingChanges() {
     const summaries = [];
     const processedLinkIds = new Set();
+    const deletedLinkIds = new Set();
 
     for (const item of this.items) {
       if (!item.isDirty) continue;
@@ -651,6 +663,13 @@ const schemaViewModel = {
       for (const [perspName, perspectives] of Object.entries(item.links)) {
         for (const p of perspectives) {
           if (p.isReadonly) continue;
+          if (p.isDeleted) {
+            if (!deletedLinkIds.has(p.linkId)) {
+              deletedLinkIds.add(p.linkId);
+              summaries.push({ label: `- Link "${perspName}"`, changes: [] });
+            }
+            continue;
+          }
           if (p.name !== p.originalName) {
             summaries.push({ label: `"${perspName}"`, changes: [`Name: "${p.originalName}" → "${p.name}"`] });
           }
