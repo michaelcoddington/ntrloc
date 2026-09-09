@@ -710,12 +710,18 @@ class NtrlocItemDetail extends HTMLElement {
     }
   }
 
-  // Native confirm(), same as the item type/trait "Delete" flow above -- deleting a marker cascades
-  // into its grants (marker_grant) and its item assignments (register_item_marker), so it's worth
-  // naming what's about to happen even though this file can't know the counts without a dedicated
-  // usage-lookup endpoint (not built yet).
+  // openConfirmDialog, same as the item type/trait "Delete" flow below -- deleting a marker
+  // cascades into its grants (marker_grant) and its item assignments (register_item_marker), so
+  // it's worth naming what's about to happen even though this file can't know the counts without
+  // a dedicated usage-lookup endpoint (not built yet).
   async onDeleteMarker(marker) {
-    if (!confirm(`Delete marker "${marker.name}"? This also removes any grants and item assignments that use it. This cannot be undone.`)) return;
+    const confirmed = await openConfirmDialog({
+      title: 'Delete Marker',
+      message: `Delete marker "${marker.name}"? This also removes any grants and item assignments that use it. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!confirmed) return;
     this._markerError = null;
     try {
       await schemaViewModel.deleteMarker(marker.id);
@@ -754,11 +760,17 @@ class NtrlocItemDetail extends HTMLElement {
     }
   }
 
-  // Native confirm(), same as onDeleteMarker above. A deleted rule stops firing on future
+  // openConfirmDialog, same as onDeleteMarker above. A deleted rule stops firing on future
   // create/update evaluations; markers it already applied stay on their items (see
   // AuthorizationRepository.deleteMarkerRule) -- worth naming so the admin isn't surprised.
   async onDeleteMarkerRule(rule) {
-    if (!confirm(`Delete assignment rule "${rule.name}"? It will stop assigning markers on future changes. Markers it has already applied stay in place.`)) return;
+    const confirmed = await openConfirmDialog({
+      title: 'Delete Assignment Rule',
+      message: `Delete assignment rule "${rule.name}"? It will stop assigning markers on future changes. Markers it has already applied stay in place.`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!confirmed) return;
     this._markerRuleError = null;
     try {
       await schemaViewModel.deleteMarkerRule(rule.id);
@@ -1040,10 +1052,16 @@ class NtrlocItemDetail extends HTMLElement {
     // explicit prompt naming exactly what's being deleted. Skipped for a still-new, unsaved
     // entity -- nothing has been persisted yet, so there's nothing to lose by discarding it.
     const deleteButton = this.querySelector('.delete-entity-button');
-    if (deleteButton) deleteButton.addEventListener('click', () => {
+    if (deleteButton) deleteButton.addEventListener('click', async () => {
       if (!item.isNew) {
         const label = this.isItem ? 'item type' : 'trait';
-        if (!confirm(`Delete ${label} "${item.name}"? This cannot be undone.`)) return;
+        const confirmed = await openConfirmDialog({
+          title: `Delete ${this.isItem ? 'Item Type' : 'Trait'}`,
+          message: `Delete ${label} "${item.name}"? This cannot be undone.`,
+          confirmLabel: 'Delete',
+          destructive: true,
+        });
+        if (!confirmed) return;
       }
       if (this.isItem) schemaViewModel.deleteItem(item);
       else schemaViewModel.deleteTrait(item);

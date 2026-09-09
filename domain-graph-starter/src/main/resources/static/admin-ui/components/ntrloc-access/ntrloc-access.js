@@ -165,13 +165,14 @@ injectStyles('ntrloc-access-styles', `
   .axs-badge-admin {
     margin-left: auto;
     flex-shrink: 0;
-    font-size: 14px;
+    font-size: 12px;
+    line-height: 1;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.3px;
     color: #1a1a1a;
     background: #e8a735;
-    padding: 2px 6px;
+    padding: 1px 5px;
     border-radius: 4px;
   }
 
@@ -252,16 +253,6 @@ injectStyles('ntrloc-access-styles', `
   }
   .axs-tree-label { font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
   .axs-tree-count { margin-left: auto; color: var(--muted); font-size: 14px; flex-shrink: 0; }
-  .axs-badge-default {
-    font-size: 14px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: white;
-    background: var(--accent);
-    padding: 2px 6px;
-    border-radius: 4px;
-    flex-shrink: 0;
-  }
   .axs-tree-children.collapsed { display: none; }
   .axs-tree-icon-itemtype {
     width: 18px;
@@ -341,6 +332,9 @@ injectStyles('ntrloc-access-styles', `
   .axs-type-pill.axs-pill-admin {
     background: #e8a735;
     color: #1a1a1a;
+    font-size: 12px;
+    line-height: 1;
+    padding: 1px 7px;
   }
   .axs-detail-sub {
     color: var(--muted);
@@ -592,6 +586,20 @@ injectStyles('ntrloc-access-styles', `
     cursor: pointer;
   }
   .axs-perm-mode-toggle input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
+  /* Group perspective's own Permissions tab: an always-visible scan of every item type's own
+     type-level Read/Create, replacing the old per-item-type click-through -- see
+     renderItemTypeOverviewTable's own comment. */
+  .axs-itemtype-overview-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+  .axs-itemtype-overview-table th { text-align: left; padding: 6px 10px; color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 1px solid var(--border); }
+  .axs-itemtype-overview-table th:not(:first-child) { width: 90px; }
+  .axs-itemtype-overview-row { cursor: pointer; }
+  /* border-left lives on the cell, not the <tr> -- a table row's own border is unreliable across
+     browsers under border-collapse:collapse, unlike .axs-tree-row's plain div equivalent. */
+  .axs-itemtype-overview-row td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .axs-itemtype-overview-row td:first-child { border-left: 2px solid transparent; }
+  .axs-itemtype-overview-row:hover { background: var(--panel-bg); }
+  .axs-itemtype-overview-row.selected { background: var(--panel-bg); }
+  .axs-itemtype-overview-row.selected td:first-child { border-left-color: var(--accent); color: var(--accent); font-weight: 600; }
   .axs-grant-detail-pane { flex: 1; min-width: 0; }
   .axs-grant-detail-header {
     display: flex;
@@ -614,12 +622,17 @@ injectStyles('ntrloc-access-styles', `
   .axs-gt-subblock { margin: 10px 0 0 24px; padding-top: 10px; border-top: 1px dashed var(--border); }
   .axs-gt-subblock-label { display: block; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); margin-bottom: 6px; }
   .axs-gt-grid-scroll { overflow-x: auto; max-width: 100%; }
-  .axs-gt-grid { display: grid; gap: 3px 10px; align-items: center; width: 100%; }
+  .axs-gt-grid { display: grid; gap: 0 10px; align-items: center; width: 100%; }
   .axs-gt-row { display: contents; }
   /* Overrides .axs-gt-row's own display:contents above -- see .axs-shadow-warn[hidden]'s own
      comment for why the [hidden] attribute needs an explicit rule here to actually hide anything. */
   .axs-gt-row[hidden] { display: none; }
   .axs-gt-header { font-size: 14px; color: var(--muted); font-weight: 700; letter-spacing: 0.03em; padding-bottom: 5px; border-bottom: 1px solid var(--border); text-align: left; }
+  /* Row separator + breathing room on every property/link/state-machine-start row -- each cell
+     gets its own border rather than the row itself (a .axs-gt-row is display:contents, so it has
+     no box of its own to put one border on), but since they all share one grid row at the same
+     height, the borders line up into what reads as a single line across the row. */
+  .axs-gt-name-cell, .axs-gt-cell { padding: 7px 0; border-bottom: 1px solid var(--border); }
   .axs-gt-name-cell { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .axs-gt-name-cell .axs-disclosure { margin-right: 4px; }
   .axs-gt-cell { text-align: left; }
@@ -715,12 +728,13 @@ injectStyles('ntrloc-access-styles', `
   .axs-user-grid-cell-sub { font-size: 14px; color: var(--muted); }
   .axs-admin-chip {
     display: inline-block;
-    font-size: 14px;
+    font-size: 12px;
+    line-height: 1;
     font-weight: 700;
     text-transform: uppercase;
     color: #1a1a1a;
     background: #e8a735;
-    padding: 2px 6px;
+    padding: 1px 5px;
     border-radius: 999px;
   }
 
@@ -834,6 +848,18 @@ class NtrlocAccess extends HTMLElement {
     this.permMode = null; // 'granted' | 'all' -- null until enterPermissionsTab picks a default
     this.permMarkerIds = null; // Set<markerId> this principal has its own marker_grant row for; null until fetched
     this.permTypeLevelItemTypeIds = null; // Set<itemTypeId> this principal has any type-level grant on
+    // Group perspective's own Permissions tab only: Map<itemTypeId, {read, create}> -- this group's
+    // OWN type-level grant on every item type, fetched once per tab-enter so the overview table
+    // (see renderItemTypeOverviewTable) can show every row's Read/Create at a glance without a
+    // click-through per item type.
+    this.permTypeLevelOwnByItemType = new Map();
+    // Same shape, but the UNION of every ancestor's own type-level grant per item type -- an
+    // own-only table would silently under-report a group like "Editors" nested under "everyone",
+    // showing it as having no Read at all on a type it actually reads fine via inheritance. Fetched
+    // alongside permTypeLevelOwnByItemType so the overview table can show the same dim-if-
+    // inherited-only convention permCheckHtml already uses everywhere else in this file.
+    this.permTypeLevelInheritedByItemType = new Map();
+    this.markerError = ''; // "+ New" marker modal's own validation/request error
     // User perspective only: [{ principal: {kind,id,name}, markerIds: Set, typeIds: Set }, ...] --
     // principal[0] is the user themselves (name: null), the rest are their reach groups. Folds
     // into "Granted markers" mode's union (a user with zero direct grants but real group access
@@ -982,7 +1008,8 @@ class NtrlocAccess extends HTMLElement {
   async selectUser(userId) {
     this.selectedUserId = userId;
     this.perspective = 'user';
-    this.activeTab = 'details';
+    // activeTab deliberately NOT reset here -- switching users should keep whatever tab was
+    // already active. The branch below loads that tab's own data for the newly selected user.
     this.tokens = [];
     this.createdToken = null;
     this.resetPasswordOpen = false;
@@ -996,7 +1023,9 @@ class NtrlocAccess extends HTMLElement {
     this.permTypeLevelItemTypeIds = null;
     this.userReachContributions = null;
     await Promise.all([this.fetchUserTokens(), this.fetchUserGroups()]);
-    this.render();
+    if (this.activeTab === 'groups') await this.enterGroupsTab();
+    else if (this.activeTab === 'permissions') await this.enterPermissionsTab('user', this.selectedUser());
+    else this.render();
   }
 
   async fetchUserGroups() {
@@ -1308,15 +1337,20 @@ class NtrlocAccess extends HTMLElement {
   async selectGroup(groupId) {
     this.selectedGroupId = groupId;
     this.perspective = 'group';
-    this.groupActiveTab = 'membership';
+    // groupActiveTab deliberately NOT reset here -- switching groups should keep whatever tab
+    // was already active. loadGroupMembership() still runs unconditionally below because it also
+    // feeds the sidebar's "People reached by" panel, which is visible regardless of tab.
     this.groupMembershipFilter = '';
     this.groupRenaming = false;
     this.groupError = '';
     this.permMode = null;
     this.permMarkerIds = null;
     this.permTypeLevelItemTypeIds = null;
+    this.permTypeLevelOwnByItemType = new Map();
+    this.permTypeLevelInheritedByItemType = new Map();
     await this.loadGroupMembership();
-    this.render();
+    if (this.groupActiveTab === 'permissions') await this.enterPermissionsTab('group', this.selectedGroup());
+    else this.render();
   }
 
   async loadGroupMembership() {
@@ -2082,6 +2116,7 @@ class NtrlocAccess extends HTMLElement {
       case 'add-user-grant': return this.renderAddUserGrantModalBody();
       case 'confirm-delete-grant': return this.renderConfirmDeleteGrantModalBody();
       case 'token-reveal': return this.renderTokenRevealModal();
+      case 'create-marker': return this.renderCreateMarkerModal();
       default: return '';
     }
   }
@@ -2256,7 +2291,6 @@ class NtrlocAccess extends HTMLElement {
           <span class="axs-disclosure axs-disclosure-lg ${kids.length ? 'open' : 'leaf'}">&#9656;</span>
           <span class="axs-tree-icon-group">G</span>
           <span class="axs-tree-label">${this.escapeHtml(g.name)}</span>
-          ${this.isDefaultGroup(g) ? '<span class="axs-badge-default">default</span>' : ''}
           <span class="axs-tree-count">${g.memberCount}</span>
         </div>
         ${kids.length ? `<div class="axs-tree-children">${kids.map(k => this.renderUserGroupTreeNode(k, depth + 1, relevant)).join('')}</div>` : ''}
@@ -2445,7 +2479,6 @@ class NtrlocAccess extends HTMLElement {
           <span class="axs-disclosure axs-disclosure-lg ${hasChildren ? '' : 'leaf'} ${isOpen ? 'open' : ''}" data-toggle-group-node="${g.id}">&#9656;</span>
           <span class="axs-tree-icon-group">G</span>
           <span class="axs-tree-label">${this.escapeHtml(g.name)}</span>
-          ${this.isDefaultGroup(g) ? '<span class="axs-badge-default">default</span>' : ''}
           <span class="axs-tree-count">${g.memberCount}</span>
         </div>
         ${hasChildren ? `<div class="axs-tree-children ${isOpen ? '' : 'collapsed'}">${kids.map(k => this.renderGroupNode(k, depth + 1, subtreeMatches, filterActive)).join('')}</div>` : ''}
@@ -2609,8 +2642,43 @@ class NtrlocAccess extends HTMLElement {
     this.render();
     await this.fetchSchema();
     await this.fetchPermGrantedIds(kind, principal.id);
+    if (kind === 'group') await this.fetchGroupTypeLevelOwnMap(principal.id);
     if (!this.permMode) this.permMode = 'all';
     await this.enterPermFirstAvailable(kind, principal);
+  }
+
+  // Same endpoint the Item Type perspective's own type-level detail pane already uses for "own",
+  // just fetched once for every item type at once instead of one at a time.
+  async fetchGroupTypeLevelPermissionsRaw(groupId) {
+    const res = await fetch(`/api/admin/groups/${groupId}/permissions`, { credentials: 'include' });
+    const rows = res.ok ? await res.json() : [];
+    const map = new Map();
+    for (const row of rows) {
+      map.set(row.itemTypeId, {
+        read: row.operations.includes('item-type:read'),
+        create: row.operations.includes('item-type:create'),
+      });
+    }
+    return map;
+  }
+
+  // Populates permTypeLevelOwnByItemType and permTypeLevelInheritedByItemType (see their own
+  // comments): one fetch for this group's own grants, plus one more per ancestor (not per
+  // item-type-per-ancestor -- fetchGroupTypeLevelPermissionsRaw already returns every item type in
+  // one call, same trick selectGrantPrincipal's own per-item-type ancestor walk doesn't get to use
+  // since it only ever fetches one item type at a time).
+  async fetchGroupTypeLevelOwnMap(groupId) {
+    this.permTypeLevelOwnByItemType = await this.fetchGroupTypeLevelPermissionsRaw(groupId);
+    const ancestors = this.ancestorChain(groupId);
+    const ancestorMaps = await Promise.all(ancestors.map(a => this.fetchGroupTypeLevelPermissionsRaw(a.id)));
+    const inherited = new Map();
+    for (const ancestorMap of ancestorMaps) {
+      for (const [itemTypeId, flags] of ancestorMap) {
+        const existing = inherited.get(itemTypeId) || { read: false, create: false };
+        inherited.set(itemTypeId, { read: existing.read || flags.read, create: existing.create || flags.create });
+      }
+    }
+    this.permTypeLevelInheritedByItemType = inherited;
   }
 
   // Pure fetch of one principal's OWN granted marker/item-type ids -- no reach-group expansion,
@@ -2667,6 +2735,7 @@ class NtrlocAccess extends HTMLElement {
     const currentId = kind === 'group' ? this.selectedGroupId : this.selectedUserId;
     if (currentId === principalId) {
       await this.fetchPermGrantedIds(kind, principalId);
+      if (kind === 'group') await this.fetchGroupTypeLevelOwnMap(principalId);
       return;
     }
     // Origin-tree case: a mutation on one of the CURRENTLY-VIEWED user's reach groups (edited via
@@ -2760,13 +2829,29 @@ class NtrlocAccess extends HTMLElement {
     } else {
       detailHtml = this.renderTypeLevelDetailPane();
     }
+    // Group perspective: an always-visible overview table (every item type's own type-level Read/
+    // Create at a glance) replaces the old item-type/marker accordion tree entirely -- selecting a
+    // row drives both the markers panel below it and the detail pane, exactly as the tree used to.
+    // See renderItemTypeOverviewTable's own comment for why this predates the User perspective
+    // getting the same treatment.
+    if (kind === 'group') {
+      return `
+        ${modeToggle}
+        ${this.renderItemTypeOverviewTable(scopeList)}
+        <div class="axs-grant-layout">
+          <div class="axs-grant-left">${this.renderGroupPermMarkersPanel(scopeList)}</div>
+          <div class="axs-grant-detail-pane">${detailHtml}</div>
+        </div>
+      `;
+    }
+
     // User tab gets two extra stacked blocks below the item-type/marker tree, in the SAME left
     // column: "Direct grants" (a single selectable node -- this user's own row) and "Group grants"
     // (the real, full group hierarchy, reusing renderGrantGroupTreeNode verbatim -- same component
     // the Item Type perspective's own left column already uses). Clicking either drives the
     // detail pane exactly like clicking a principal there does; data-select-grant is already wired
     // generically (see bindEvents), so no new click handling is needed for this at all.
-    const userGrantsBlocksHtml = kind === 'user' ? this.renderUserGrantsBlocks(principal.id) : '';
+    const userGrantsBlocksHtml = this.renderUserGrantsBlocks(principal.id);
     return `
       ${modeToggle}
       <div class="axs-grant-layout">
@@ -2780,6 +2865,111 @@ class NtrlocAccess extends HTMLElement {
         <div class="axs-grant-detail-pane">${detailHtml}</div>
       </div>
     `;
+  }
+
+  // Group perspective's own Permissions tab only -- an always-visible summary of this group's
+  // effective type-level Read/Create across every item type in scopeList, so checking a different
+  // item type never requires expanding/clicking each one in turn the way the old accordion tree
+  // did. Own+inherited, using the same dim-if-inherited-only convention permCheckHtml already
+  // renders everywhere else -- own-only would silently under-report a group like "Editors" nested
+  // under "everyone" as having no Read at all on a type it actually reads fine via inheritance.
+  // The type-level detail pane below still gives the full redundancy-badge breakdown (which
+  // ancestor specifically grants it) once a row is selected.
+  renderItemTypeOverviewTable(scopeList) {
+    const rows = scopeList.map(({ itemType }) => {
+      const own = this.permTypeLevelOwnByItemType.get(itemType.id) || { read: false, create: false };
+      const inherited = this.permTypeLevelInheritedByItemType.get(itemType.id) || { read: false, create: false };
+      const selected = this.selectedItemTypeId === itemType.id;
+      const check = (field) => this.permCheckHtml(own[field], inherited[field], null, [], []);
+      return `
+        <tr class="axs-itemtype-overview-row ${selected ? 'selected' : ''}" data-select-perm-itemtype="${itemType.id}">
+          <td>${this.escapeHtml(itemType.name)}</td>
+          <td>${check('read')}</td>
+          <td>${check('create')}</td>
+        </tr>
+      `;
+    }).join('');
+    return `
+      <table class="axs-itemtype-overview-table">
+        <thead><tr><th>Item Type</th><th>Read</th><th>Create</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  // Group perspective's own Permissions tab only -- markers for whichever item type is currently
+  // selected in the overview table above (data-select-perm-itemtype/data-select-perm-marker are
+  // already generic, wired once in bindEvents -- reused verbatim here). "+ New" opens a minimal
+  // marker-creation modal scoped to that item type, restoring the old screen's own shortcut so
+  // creating a marker for the type you're already looking at doesn't require a trip to the Schema
+  // tab.
+  renderGroupPermMarkersPanel(scopeList) {
+    const current = scopeList.find(s => s.itemType.id === this.selectedItemTypeId);
+    const markers = current ? current.markers : [];
+    const rows = markers.length
+      ? markers.map(m => `
+          <div class="axs-tree-row ${this.selectedMarkerId === m.id ? 'selected' : ''}" data-select-perm-marker="${this.selectedItemTypeId}::${m.id}">
+            <span class="axs-tree-label">${this.escapeHtml(m.name)}</span>
+          </div>
+        `).join('')
+      : '<div class="axs-directory-empty">No markers on this item type.</div>';
+    return `
+      <div>
+        <div class="axs-grant-block-title">Markers <span class="axs-add-link" data-action="open-create-marker">+ New</span></div>
+        <div class="axs-grant-list">${rows}</div>
+      </div>
+    `;
+  }
+
+  openCreateMarkerModal() {
+    this.markerError = '';
+    this.modal = { type: 'create-marker', itemTypeId: this.selectedItemTypeId };
+    this.render();
+  }
+
+  renderCreateMarkerModal() {
+    const itemType = this.itemTypes.find(t => t.id === this.modal.itemTypeId);
+    return `
+      <div class="axs-modal-overlay" data-action="close-modal-overlay">
+        <div class="axs-modal" data-stop-overlay>
+          <div class="axs-modal-header">New marker on "${this.escapeHtml(itemType?.name || '')}"</div>
+          <div class="axs-modal-body">
+            ${this.markerError ? `<div class="axs-error">${this.escapeHtml(this.markerError)}</div>` : ''}
+            <label>Name</label>
+            <input name="marker-name" placeholder="Marker name" autocomplete="off">
+            <label>Description (optional)</label>
+            <input name="marker-description" placeholder="Description" autocomplete="off">
+          </div>
+          <div class="axs-modal-footer">
+            <button class="axs-btn axs-btn-cancel" data-action="close-modal">Cancel</button>
+            <button class="axs-btn axs-btn-primary" data-action="submit-create-marker">Create marker</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Markers live outside the schema-mutation batch system entirely (see MarkerAdminController's
+  // own comment) -- a direct, immediate POST, same as every other marker-grant endpoint this
+  // screen already calls, not something that needs a Schema-tab-style staged Save.
+  async submitCreateMarker() {
+    const name = this.querySelector('[name="marker-name"]')?.value.trim();
+    const description = this.querySelector('[name="marker-description"]')?.value.trim() || null;
+    if (!name) { this.markerError = 'Marker name is required.'; this.render(); return; }
+    const itemTypeId = this.modal.itemTypeId;
+    try {
+      const res = await fetch('/api/admin/markers', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ name, description, scopeKind: 'ITEM_TYPE', scopeId: itemTypeId }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'Failed to create marker.');
+      const marker = await res.json();
+      this.modal = null;
+      this.markerError = '';
+      await this.fetchMarkers();
+      await this.selectPermMarker('group', this.selectedGroupId, itemTypeId, marker.id);
+      this.toast(`Created marker "${marker.name}".`);
+    } catch (e) { this.markerError = e.message; this.render(); }
   }
 
   renderUserGrantsBlocks(userId) {
@@ -3160,11 +3350,18 @@ class NtrlocAccess extends HTMLElement {
   // Shared by both detail panes: the selected principal's name plus Edit/Save/Cancel/Delete --
   // deliberately no "has no grant of its own" note (own-vs-inherited is now shown per leaf via the
   // dim/bright distinction below, so a separate summary line would just repeat it).
+  //
+  // Delete is hidden in the Group perspective's own Permissions tab: that view already sits right
+  // below the group's own header, which has its OWN "Delete" (deletes the group) -- a second
+  // "Delete" here, meaning only "revoke this one grant", read as confusingly ambiguous next to it.
+  // Removing a grant's principal entirely is still available from the Item Type perspective, where
+  // this header is the only delete-like control on screen.
   renderGrantDetailHeader() {
     const hasOwnGrant = this.grantHasOwn();
+    const showDelete = hasOwnGrant && !(this.perspective === 'group' && this.groupActiveTab === 'permissions');
     const editControls = this.grantEditing
       ? `<div class="axs-detail-actions-bar"><button class="axs-btn axs-btn-cancel" data-action="cancel-grant-edit">Cancel</button><button class="axs-btn axs-btn-primary" data-action="save-grant-edit">Save changes</button></div>`
-      : `<div class="axs-detail-actions-bar"><button class="axs-btn axs-btn-cancel" data-action="start-grant-edit">Edit</button>${hasOwnGrant ? `<button class="axs-btn axs-btn-danger" data-action="open-delete-grant">Delete</button>` : ''}</div>`;
+      : `<div class="axs-detail-actions-bar"><button class="axs-btn axs-btn-cancel" data-action="start-grant-edit">Edit</button>${showDelete ? `<button class="axs-btn axs-btn-danger" data-action="open-delete-grant">Delete</button>` : ''}</div>`;
     return `<div class="axs-grant-detail-header"><span class="name">${this.escapeHtml(this.grantPrincipalName())}</span>${editControls}</div>`;
   }
 
@@ -3712,6 +3909,8 @@ class NtrlocAccess extends HTMLElement {
       });
     });
     this.querySelector('[data-action="open-add-user-grant"]')?.addEventListener('click', () => this.openAddUserGrantModal());
+    this.querySelector('[data-action="open-create-marker"]')?.addEventListener('click', () => this.openCreateMarkerModal());
+    this.querySelector('[data-action="submit-create-marker"]')?.addEventListener('click', () => this.submitCreateMarker());
     // Toggles its own button in place -- read at Save time via dataset.granted, no re-render needed
     // per click. dataset.inherited is static (set once at render from the ancestor-only grant) so a
     // leaf that's only ever inherited never goes fully empty here: unchecking it just drops back to
