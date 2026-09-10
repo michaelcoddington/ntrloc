@@ -16,8 +16,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -52,13 +53,14 @@ public class DecisionAdminController {
     // getDefinitionXml: decision ids follow the same "<key>:<version>:<generatedId>" shape, and a
     // literal colon in a path segment 404s (Reactor Netty's URI parsing, ahead of Spring routing).
     @GetMapping("/decisions/xml")
-    ResponseEntity<String> getDecisionXml(@RequestParam String id) throws IOException {
-        try (InputStream in = dmnRepositoryService.getDmnResource(id)) {
-            String xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(xml);
-        }
+    Mono<ResponseEntity<String>> getDecisionXml(@RequestParam String id) {
+        return Mono.fromCallable(() -> {
+                    try (InputStream in = dmnRepositoryService.getDmnResource(id)) {
+                        return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                    }
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(xml -> ResponseEntity.ok().contentType(MediaType.APPLICATION_XML).body(xml));
     }
 
     // First-ever save of a brand-new decision table (see ntrloc-decision-table-editor.js's own

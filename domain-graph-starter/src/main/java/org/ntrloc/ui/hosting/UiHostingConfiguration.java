@@ -22,6 +22,11 @@ public class UiHostingConfiguration implements WebFluxConfigurer {
         return new MountWelcomePageFilter(properties);
     }
 
+    @Bean
+    WebFilter staticResourceOffloadFilter() {
+        return new StaticResourceOffloadFilter(properties);
+    }
+
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
         for (UiHostingProperties.Mount mount : properties.mounts()) {

@@ -4,6 +4,13 @@ server:
 spring:
   application:
     name: ntrloc
+  web:
+    resources:
+      # Spring Boot's own default static-resource handler otherwise serves classpath:/static/**
+      # (which includes the admin-ui, physically under .../static/admin-ui/) at the URL root,
+      # ambiently exposing it at /admin-ui/** with none of graph.ui.mounts' caching, SPA fallback,
+      # or SecurityConfig's "/admin/**" hasRole("ADMIN") check -- /admin is the one intended path.
+      add-mappings: false
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:ntrloc}
     username: ${DB_USER:ntrloc}

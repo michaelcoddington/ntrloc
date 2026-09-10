@@ -2643,6 +2643,7 @@ class NtrlocAccess extends HTMLElement {
     await this.fetchSchema();
     await this.fetchPermGrantedIds(kind, principal.id);
     if (kind === 'group') await this.fetchGroupTypeLevelOwnMap(principal.id);
+    else await this.fetchUserTypeLevelOwnMap(principal.id);
     if (!this.permMode) this.permMode = 'all';
     await this.enterPermFirstAvailable(kind, principal);
   }
@@ -2674,6 +2675,38 @@ class NtrlocAccess extends HTMLElement {
     const inherited = new Map();
     for (const ancestorMap of ancestorMaps) {
       for (const [itemTypeId, flags] of ancestorMap) {
+        const existing = inherited.get(itemTypeId) || { read: false, create: false };
+        inherited.set(itemTypeId, { read: existing.read || flags.read, create: existing.create || flags.create });
+      }
+    }
+    this.permTypeLevelInheritedByItemType = inherited;
+  }
+
+  // User perspective's own Permissions tab: same overview table as the Group perspective, so "own"
+  // is this user's direct type-level grant and "inherited" is the union of every reach group's own
+  // grant (userReachGroups already includes those groups' own ancestors -- membership flows up the
+  // tree exactly like the Group perspective's own ancestorChain walk, just starting from a
+  // different set of roots).
+  async fetchUserTypeLevelPermissionsOwnRaw(userId) {
+    const res = await fetch(`/api/admin/users/${userId}/permissions/own`, { credentials: 'include' });
+    const rows = res.ok ? await res.json() : [];
+    const map = new Map();
+    for (const row of rows) {
+      map.set(row.itemTypeId, {
+        read: row.operations.includes('item-type:read'),
+        create: row.operations.includes('item-type:create'),
+      });
+    }
+    return map;
+  }
+
+  async fetchUserTypeLevelOwnMap(userId) {
+    this.permTypeLevelOwnByItemType = await this.fetchUserTypeLevelPermissionsOwnRaw(userId);
+    const reachGroups = await this.userReachGroups(userId);
+    const reachMaps = await Promise.all(reachGroups.map(g => this.fetchGroupTypeLevelPermissionsRaw(g.id)));
+    const inherited = new Map();
+    for (const reachMap of reachMaps) {
+      for (const [itemTypeId, flags] of reachMap) {
         const existing = inherited.get(itemTypeId) || { read: false, create: false };
         inherited.set(itemTypeId, { read: existing.read || flags.read, create: existing.create || flags.create });
       }
@@ -2736,6 +2769,7 @@ class NtrlocAccess extends HTMLElement {
     if (currentId === principalId) {
       await this.fetchPermGrantedIds(kind, principalId);
       if (kind === 'group') await this.fetchGroupTypeLevelOwnMap(principalId);
+      else await this.fetchUserTypeLevelOwnMap(principalId);
       return;
     }
     // Origin-tree case: a mutation on one of the CURRENTLY-VIEWED user's reach groups (edited via
@@ -2829,38 +2863,23 @@ class NtrlocAccess extends HTMLElement {
     } else {
       detailHtml = this.renderTypeLevelDetailPane();
     }
-    // Group perspective: an always-visible overview table (every item type's own type-level Read/
-    // Create at a glance) replaces the old item-type/marker accordion tree entirely -- selecting a
-    // row drives both the markers panel below it and the detail pane, exactly as the tree used to.
-    // See renderItemTypeOverviewTable's own comment for why this predates the User perspective
-    // getting the same treatment.
-    if (kind === 'group') {
-      return `
-        ${modeToggle}
-        ${this.renderItemTypeOverviewTable(scopeList)}
-        <div class="axs-grant-layout">
-          <div class="axs-grant-left">${this.renderGroupPermMarkersPanel(scopeList)}</div>
-          <div class="axs-grant-detail-pane">${detailHtml}</div>
-        </div>
-      `;
-    }
-
-    // User tab gets two extra stacked blocks below the item-type/marker tree, in the SAME left
-    // column: "Direct grants" (a single selectable node -- this user's own row) and "Group grants"
-    // (the real, full group hierarchy, reusing renderGrantGroupTreeNode verbatim -- same component
-    // the Item Type perspective's own left column already uses). Clicking either drives the
-    // detail pane exactly like clicking a principal there does; data-select-grant is already wired
+    // Both perspectives share the same layout: an always-visible overview table (every item type's
+    // own type-level Read/Create at a glance) at top, a markers panel scoped to whichever item type
+    // is selected there, and a detail pane. The User perspective additionally gets two stacked
+    // blocks below the markers panel, in the SAME left column: "Direct grants" (a single selectable
+    // node -- this user's own row) and "Group grants" (the real, full group hierarchy, reusing
+    // renderGrantGroupTreeNode verbatim -- same component the Item Type perspective's own left
+    // column already uses), letting the admin pick which of this marker's grant sources (direct, or
+    // via a specific group) the detail pane on the right shows. Clicking either drives the detail
+    // pane exactly like clicking a principal there does; data-select-grant is already wired
     // generically (see bindEvents), so no new click handling is needed for this at all.
-    const userGrantsBlocksHtml = this.renderUserGrantsBlocks(principal.id);
+    const leftExtra = kind === 'user' ? this.renderUserGrantsBlocks(principal.id) : '';
     return `
-      ${modeToggle}
+      ${this.renderItemTypeOverviewTable(scopeList)}
       <div class="axs-grant-layout">
         <div class="axs-grant-left">
-          <div>
-            <div class="axs-grant-block-title">ITEM TYPES</div>
-            <div class="axs-grant-list">${this.renderPermTree(scopeList)}</div>
-          </div>
-          ${userGrantsBlocksHtml}
+          ${this.renderPermMarkersPanel(scopeList, modeToggle)}
+          ${leftExtra}
         </div>
         <div class="axs-grant-detail-pane">${detailHtml}</div>
       </div>
@@ -2897,13 +2916,13 @@ class NtrlocAccess extends HTMLElement {
     `;
   }
 
-  // Group perspective's own Permissions tab only -- markers for whichever item type is currently
-  // selected in the overview table above (data-select-perm-itemtype/data-select-perm-marker are
-  // already generic, wired once in bindEvents -- reused verbatim here). "+ New" opens a minimal
-  // marker-creation modal scoped to that item type, restoring the old screen's own shortcut so
-  // creating a marker for the type you're already looking at doesn't require a trip to the Schema
-  // tab.
-  renderGroupPermMarkersPanel(scopeList) {
+  // Shared by both perspectives' own Permissions tab -- markers for whichever item type is
+  // currently selected in the overview table above (data-select-perm-itemtype/data-select-perm-
+  // marker are already generic, wired once in bindEvents -- reused verbatim here). "+ New" opens a
+  // minimal marker-creation modal scoped to that item type, restoring the old screen's own shortcut
+  // so creating a marker for the type you're already looking at doesn't require a trip to the
+  // Schema tab.
+  renderPermMarkersPanel(scopeList, modeToggle) {
     const current = scopeList.find(s => s.itemType.id === this.selectedItemTypeId);
     const markers = current ? current.markers : [];
     const rows = markers.length
@@ -2916,6 +2935,7 @@ class NtrlocAccess extends HTMLElement {
     return `
       <div>
         <div class="axs-grant-block-title">Markers <span class="axs-add-link" data-action="open-create-marker">+ New</span></div>
+        ${modeToggle}
         <div class="axs-grant-list">${rows}</div>
       </div>
     `;
@@ -2967,7 +2987,9 @@ class NtrlocAccess extends HTMLElement {
       this.modal = null;
       this.markerError = '';
       await this.fetchMarkers();
-      await this.selectPermMarker('group', this.selectedGroupId, itemTypeId, marker.id);
+      const kind = this.perspective;
+      const principalId = kind === 'group' ? this.selectedGroupId : this.selectedUserId;
+      await this.selectPermMarker(kind, principalId, itemTypeId, marker.id);
       this.toast(`Created marker "${marker.name}".`);
     } catch (e) { this.markerError = e.message; this.render(); }
   }
@@ -2994,31 +3016,6 @@ class NtrlocAccess extends HTMLElement {
         <div class="axs-grant-list">${groupTreeHtml}</div>
       </div>
     `;
-  }
-
-  renderPermTree(scopeList) {
-    return scopeList.map(({ itemType, markers }) => {
-      const isOpen = this.selectedItemTypeId === itemType.id;
-      const selected = isOpen && !this.selectedMarkerId;
-      const childrenHtml = isOpen && markers.length
-        ? `<div class="axs-tree-children">${markers.map(m => `
-            <div class="axs-marker-chip-row" data-select-perm-marker="${itemType.id}::${m.id}">
-              <span class="axs-marker-chip ${this.selectedMarkerId === m.id ? 'selected' : ''}">${this.escapeHtml(m.name)}</span>
-            </div>
-          `).join('')}</div>`
-        : '';
-      return `
-        <div class="axs-tree-node">
-          <div class="axs-tree-row ${selected ? 'selected' : ''}" data-select-perm-itemtype="${itemType.id}">
-            <span class="axs-disclosure axs-disclosure-lg ${markers.length ? '' : 'leaf'} ${isOpen ? 'open' : ''}">&#9656;</span>
-            <span class="axs-tree-icon-itemtype">T</span>
-            <span class="axs-tree-label">${this.escapeHtml(itemType.name)}</span>
-            ${markers.length ? `<span class="axs-tree-count">${markers.length} marker${markers.length === 1 ? '' : 's'}</span>` : ''}
-          </div>
-          ${childrenHtml}
-        </div>
-      `;
-    }).join('');
   }
 
   // "everyone" is the one and only top-level group (see the backend's own createGroup comment) --
@@ -3512,11 +3509,27 @@ class NtrlocAccess extends HTMLElement {
   // hide every descendant row in one pass (syncPropertyRowVisibility), however deep, without a
   // real DOM parent/child relationship to lean on -- wrapGrantGrid's rows are flat CSS-grid
   // siblings (display:contents), not actually nested in the DOM.
-  renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap) {
+  renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap, openState) {
     const hasChildren = node.type === 'OBJECT' && node.properties && node.properties.length > 0;
-    const isOpen = hasChildren && !this.collapsedObjectProperties.has(node.id);
+    // Default open only if some leaf under here actually has a grant -- an admin shouldn't have to
+    // manually collapse every empty branch of a deeply-nested OBJECT property just to find the ones
+    // that matter. collapsedObjectProperties still just records "this id has been clicked" (an odd
+    // number of times); XORing that against the computed default is what lets a leaf-less/grant-less
+    // container start collapsed while a manual click still flips it open, and vice versa for a
+    // container that starts open because it has something. defaultOpen is stamped onto the toggle
+    // itself (data-default-open) so the click handler can redo this same XOR without needing
+    // ownMap/inheritedMap in scope; openState (populated pre-order as the tree walk renders parents
+    // before children) is how a descendant row finds out whether each of its ancestors -- not just
+    // whether that ancestor id is in collapsedObjectProperties -- actually ended up open.
+    const defaultOpen = hasChildren && this.leafPropertyIdsUnder(node).some(id => {
+      const own = ownMap.get(id) || {};
+      const inherited = inheritedMap.get(id) || {};
+      return own.read || own.write || inherited.read || inherited.write;
+    });
+    const isOpen = hasChildren && (defaultOpen !== this.collapsedObjectProperties.has(node.id));
+    if (hasChildren) openState.set(node.id, isOpen);
     const disclosure = hasChildren
-      ? `<span class="axs-disclosure ${isOpen ? 'open' : ''}" data-toggle-object-property="${node.id}">&#9656;</span>`
+      ? `<span class="axs-disclosure ${isOpen ? 'open' : ''}" data-toggle-object-property="${node.id}" data-default-open="${defaultOpen ? '1' : ''}">&#9656;</span>`
       : `<span class="axs-disclosure leaf">&#9656;</span>`;
     const cells = ['read', 'write'].map(f => {
       if (hasChildren) {
@@ -3536,18 +3549,24 @@ class NtrlocAccess extends HTMLElement {
       return `<div class="axs-gt-cell">${check}</div>`;
     }).join('');
     const ancestorAttr = ancestorIds.length ? ` data-property-ancestors="${ancestorIds.join(',')}"` : '';
-    const hiddenNow = ancestorIds.some(id => this.collapsedObjectProperties.has(id));
+    const hiddenNow = ancestorIds.some(id => openState.get(id) === false);
     return `<div class="axs-gt-row"${ancestorAttr}${hiddenNow ? ' hidden' : ''}><div class="axs-gt-name-cell" style="padding-left:${depth * 16}px">${disclosure}${this.escapeHtml(node.name)}</div>${cells}</div>`;
   }
 
-  // Recomputes every OBJECT-property row's visibility from collapsedObjectProperties -- called
-  // after any toggle click so a container's descendants (at any depth) hide/show together, without
-  // a full re-render (see renderPropertyGrantRow's own comment on why rows can't just nest in the
-  // DOM to get this for free).
+  // Recomputes every OBJECT-property row's visibility -- called after any toggle click so a
+  // container's descendants (at any depth) hide/show together, without a full re-render (see
+  // renderPropertyGrantRow's own comment on why rows can't just nest in the DOM to get this for
+  // free). Trusts each ancestor's own disclosure element's current .open class as ground truth
+  // (kept correct by the click handler below) rather than re-deriving it from
+  // collapsedObjectProperties directly -- since 2026-09-09 that alone no longer says whether a
+  // container is open, only whether it's been clicked (see renderPropertyGrantRow's own comment).
   syncPropertyRowVisibility() {
     this.querySelectorAll('.axs-gt-row[data-property-ancestors]').forEach(row => {
       const ancestorIds = row.dataset.propertyAncestors.split(',').filter(Boolean);
-      row.hidden = ancestorIds.some(id => this.collapsedObjectProperties.has(id));
+      row.hidden = ancestorIds.some(id => {
+        const toggle = this.querySelector(`[data-toggle-object-property="${id}"]`);
+        return toggle && !toggle.classList.contains('open');
+      });
     });
   }
 
@@ -3601,10 +3620,11 @@ class NtrlocAccess extends HTMLElement {
     const props = schema ? schema.properties : [];
     if (!props.length) return '<div class="axs-empty-hint">Nothing defined on this scope.</div>';
     const rows = [];
+    const openState = new Map(); // nodeId -> isOpen, populated pre-order (parents before children)
     const walk = (nodes, depth, ancestorIds) => {
       const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name));
       for (const node of sorted) {
-        rows.push(this.renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap));
+        rows.push(this.renderPropertyGrantRow(node, depth, ancestorIds, ownMap, inheritedMap, inheritedNamesMap, shadowNamesMap, openState));
         const hasChildren = node.type === 'OBJECT' && node.properties && node.properties.length > 0;
         if (hasChildren) walk(node.properties, depth + 1, [...ancestorIds, node.id]);
       }
@@ -3965,7 +3985,8 @@ class NtrlocAccess extends HTMLElement {
         const id = el.dataset.toggleObjectProperty;
         if (this.collapsedObjectProperties.has(id)) this.collapsedObjectProperties.delete(id);
         else this.collapsedObjectProperties.add(id);
-        el.classList.toggle('open', !this.collapsedObjectProperties.has(id));
+        const defaultOpen = el.dataset.defaultOpen === '1';
+        el.classList.toggle('open', defaultOpen !== this.collapsedObjectProperties.has(id));
         this.syncPropertyRowVisibility();
       });
     });

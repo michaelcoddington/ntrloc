@@ -25,8 +25,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -92,13 +93,14 @@ public class ProcessAdminController {
     // *segment* 404s here even URL-encoded (Reactor Netty's URI parsing, ahead of Spring's own
     // routing -- confirmed empirically, not a Spring PathPattern quirk specific to this route).
     @GetMapping("/definitions/xml")
-    ResponseEntity<String> getDefinitionXml(@RequestParam String id) throws IOException {
-        try (InputStream in = repositoryService.getProcessModel(id)) {
-            String xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(xml);
-        }
+    Mono<ResponseEntity<String>> getDefinitionXml(@RequestParam String id) {
+        return Mono.fromCallable(() -> {
+                    try (InputStream in = repositoryService.getProcessModel(id)) {
+                        return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                    }
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(xml -> ResponseEntity.ok().contentType(MediaType.APPLICATION_XML).body(xml));
     }
 
     // First-ever save of a brand-new process (mirrors DecisionAdminController.createDecision --
