@@ -2801,6 +2801,12 @@ class NtrlocAccess extends HTMLElement {
     return result;
   }
 
+  // Despite the name, this is "first available OR keep looking at the same item type/marker if
+  // it's still in scope" -- called both when switching principal (enterPermissionsTab, so e.g.
+  // picking a different group in the left nav keeps you on the same item type/marker instead of
+  // jumping back to the top) and when toggling All/Granted markers mode (setPermMode). Only
+  // actually falls back to the first entry when there's nothing selected yet, or what was selected
+  // isn't visible under the new principal/mode (e.g. "Granted markers" no longer includes it).
   async enterPermFirstAvailable(kind, principal) {
     const scopeList = this.permScopeList();
     if (!scopeList.length) {
@@ -2809,6 +2815,21 @@ class NtrlocAccess extends HTMLElement {
       this.grantSelection = null;
       this.render();
       return;
+    }
+    if (this.selectedItemTypeId) {
+      const entry = scopeList.find(s => s.itemType.id === this.selectedItemTypeId);
+      if (entry) {
+        if (this.selectedMarkerId) {
+          if (entry.markers.some(m => m.id === this.selectedMarkerId)) {
+            await this.selectPermMarker(kind, principal.id, this.selectedItemTypeId, this.selectedMarkerId);
+            return;
+          }
+          // had a marker selected but it's gone from this entry -- fall through to first-available
+        } else {
+          await this.selectPermItemType(kind, principal.id, this.selectedItemTypeId);
+          return;
+        }
+      }
     }
     const first = scopeList[0];
     if (first.markers.length) await this.selectPermMarker(kind, principal.id, first.itemType.id, first.markers[0].id);
